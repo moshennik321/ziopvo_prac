@@ -16,6 +16,7 @@ target_link_libraries(TrayApp PRIVATE
     user32
     gdi32
     comctl32
+    advapi32
 )
 
 # UTF-8 source encoding
@@ -25,4 +26,17 @@ target_compile_options(TrayApp PRIVATE /utf-8)
 target_link_options(TrayApp PRIVATE
     /MANIFEST:EMBED
     /MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/app.manifest
+)
+
+# ---- Windows Service --------------------------------------------------------
+add_executable(TrayAppService
+    src/service.cpp
+)
+
+target_compile_options(TrayAppService PRIVATE /utf-8)
+
+target_link_libraries(TrayAppService PRIVATE
+    advapi32
+    wtsapi32
+    userenv
 )

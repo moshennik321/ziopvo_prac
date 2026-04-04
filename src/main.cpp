@@ -17,6 +17,7 @@
 static const TCHAR *MUTEX_NAME    = _T("Local\\TrayApp_{7A3B9F2E-1D4C-4E5A-8F6B-0C2D3E4F5A6B}");
 static const TCHAR *WND_CLASS     = _T("TrayAppWindowClass");
 static const TCHAR *APP_TITLE     = _T("TrayApp");
+static const TCHAR *SERVICE_NAME  = _T("TrayAppService");
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -37,6 +38,7 @@ static void      ShowTrayContextMenu(HWND hWnd);
 static HMENU     CreateMainMenu();
 static void      ShowMainWindow();
 static void      ExitApp();
+static void      EnsureServiceRunning();
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -54,6 +56,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance,
     }
 
     g_hInst = hInstance;
+
+    // ---- Check and start the service if needed -----------------------------
+    EnsureServiceRunning();
 
     // Register message for taskbar recreation (Requirement 6)
     WM_TASKBAR_CREATED = RegisterWindowMessage(_T("TaskbarCreated"));
@@ -183,6 +188,28 @@ static void ShowMainWindow()
 static void ExitApp()
 {
     DestroyWindow(g_hWnd);
+}
+
+// ---------------------------------------------------------------------------
+// Check service status and start it if stopped
+// ---------------------------------------------------------------------------
+static void EnsureServiceRunning()
+{
+    SC_HANDLE hSCM = OpenSCManager(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hSCM) return;
+
+    SC_HANDLE hSvc = OpenService(hSCM, SERVICE_NAME,
+                                 SERVICE_QUERY_STATUS | SERVICE_START);
+    if (hSvc) {
+        SERVICE_STATUS ss = {};
+        if (QueryServiceStatus(hSvc, &ss)) {
+            if (ss.dwCurrentState == SERVICE_STOPPED) {
+                StartService(hSvc, 0, nullptr);
+            }
+        }
+        CloseServiceHandle(hSvc);
+    }
+    CloseServiceHandle(hSCM);
 }
 
 // ---------------------------------------------------------------------------
