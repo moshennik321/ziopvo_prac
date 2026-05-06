@@ -1,0 +1,9 @@
+[
+    uuid(6B68D2E2-4144-4F88-9B87-1A316A687B24),
+    version(1.0),
+    pointer_default(unique)
+]
+interface TrayAppRpc
+{
+    void TrayAppRpcStopService([in] handle_t hBinding);
+}
