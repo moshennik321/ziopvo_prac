@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(TrayApp WIN32
     src/main.cpp
     src/app.rc
+    src/rpc_client.cpp
+    src/trayapp_rpc_c.c
+    src/trayapp_rpc_shared.cpp
 )
 
 target_include_directories(TrayApp PRIVATE src)
@@ -17,6 +20,7 @@ target_link_libraries(TrayApp PRIVATE
     gdi32
     comctl32
     advapi32
+    rpcrt4
 )
 
 # UTF-8 source encoding
@@ -31,6 +35,8 @@ target_link_options(TrayApp PRIVATE
 # ---- Windows Service --------------------------------------------------------
 add_executable(TrayAppService
     src/service.cpp
+    src/trayapp_rpc_s.c
+    src/trayapp_rpc_shared.cpp
 )
 
 target_compile_options(TrayAppService PRIVATE /utf-8)
@@ -39,4 +45,5 @@ target_link_libraries(TrayAppService PRIVATE
     advapi32
     wtsapi32
     userenv
+    rpcrt4
 )

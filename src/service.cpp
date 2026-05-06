@@ -7,146 +7,148 @@
 #include <windows.h>
 #include <wtsapi32.h>
 #include <userenv.h>
-#include <tchar.h>
+#include <rpc.h>
+
 #include <string>
 #include <vector>
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-static const TCHAR* SERVICE_NAME     = _T("TrayAppService");
-static const TCHAR* SERVICE_DISPLAY  = _T("TrayApp Background Service");
-static const TCHAR* TRAYAPP_EXE     = _T("TrayApp.exe");
+#include "trayapp_rpc.h"
 
-// ---------------------------------------------------------------------------
-// Globals
-// ---------------------------------------------------------------------------
-static SERVICE_STATUS        g_svcStatus     = {};
-static SERVICE_STATUS_HANDLE g_svcStatusHandle = nullptr;
-static HANDLE                g_hStopEvent    = nullptr;
+namespace {
+constexpr wchar_t kServiceName[] = L"TrayAppService";
+constexpr wchar_t kServiceDisplayName[] = L"TrayApp Background Service";
+constexpr wchar_t kServiceDescription[] = L"Launches TrayApp in user sessions and exposes an RPC stop endpoint.";
+constexpr wchar_t kTrayAppBinaryName[] = L"TrayApp.exe";
+constexpr wchar_t kRpcProtocolSequence[] = L"ncalrpc";
+constexpr wchar_t kRpcEndpoint[] = L"TrayAppServiceRpcEndpoint";
+}
 
-// ---------------------------------------------------------------------------
-// Forward declarations
-// ---------------------------------------------------------------------------
+struct LaunchedProcess {
+    DWORD sessionId;
+    DWORD processId;
+    HANDLE processHandle;
+};
+
+static SERVICE_STATUS g_serviceStatus = {};
+static SERVICE_STATUS_HANDLE g_serviceStatusHandle = nullptr;
+static HANDLE g_stopEvent = nullptr;
+static CRITICAL_SECTION g_processLock = {};
+static bool g_processLockInitialized = false;
+static std::vector<LaunchedProcess> g_launchedProcesses;
+
 static void WINAPI ServiceMain(DWORD argc, LPTSTR* argv);
-static DWORD WINAPI ServiceCtrlHandler(DWORD dwControl, DWORD dwEventType,
-                                       LPVOID lpEventData, LPVOID lpContext);
-static void SetServiceStatus(DWORD state, DWORD exitCode = 0);
+static DWORD WINAPI ServiceCtrlHandler(DWORD control, DWORD eventType, LPVOID eventData, LPVOID context);
+static void SetCurrentServiceStatus(DWORD state, DWORD exitCode = NO_ERROR);
+static bool InitializeRpcServer();
+static void ShutdownRpcServer();
+static void RequestServiceShutdown();
 static void LaunchTrayAppInSession(DWORD sessionId);
 static void LaunchTrayAppInAllSessions();
-static std::wstring GetTrayAppPath();
+static void TerminateLaunchedProcesses();
+static void CleanupTrackedProcessesLocked();
+static bool HasRunningProcessForSessionLocked(DWORD sessionId);
+static std::wstring GetSiblingPath(const wchar_t* fileName);
+static std::wstring GetDirectoryName(const std::wstring& path);
+static int InstallService();
+static int UninstallService();
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
+extern "C" void TrayAppRpcStopService(handle_t)
+{
+    RequestServiceShutdown();
+}
+
 int wmain(int argc, wchar_t* argv[])
 {
-    SERVICE_TABLE_ENTRY dispatchTable[] = {
-        { const_cast<LPTSTR>(SERVICE_NAME), ServiceMain },
+    SERVICE_TABLE_ENTRYW dispatchTable[] = {
+        { const_cast<LPWSTR>(kServiceName), ServiceMain },
         { nullptr, nullptr }
     };
 
-    if (!StartServiceCtrlDispatcher(dispatchTable)) {
-        // If not started as a service, allow install/uninstall via command line
-        if (argc >= 2) {
-            if (_wcsicmp(argv[1], L"install") == 0) {
-                // Install the service
-                SC_HANDLE hSCM = OpenSCManager(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
-                if (!hSCM) return 1;
+    if (StartServiceCtrlDispatcherW(dispatchTable)) {
+        return 0;
+    }
 
-                wchar_t modulePath[MAX_PATH];
-                GetModuleFileName(nullptr, modulePath, MAX_PATH);
+    if (argc >= 2) {
+        if (_wcsicmp(argv[1], L"install") == 0) {
+            return InstallService();
+        }
 
-                SC_HANDLE hSvc = CreateService(
-                    hSCM, SERVICE_NAME, SERVICE_DISPLAY,
-                    SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
-                    SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-                    modulePath, nullptr, nullptr, nullptr, nullptr, nullptr);
-
-                if (hSvc) {
-                    // Set description
-                    SERVICE_DESCRIPTION desc;
-                    desc.lpDescription = const_cast<LPWSTR>(
-                        L"Launches TrayApp in user sessions automatically.");
-                    ChangeServiceConfig2(hSvc, SERVICE_CONFIG_DESCRIPTION, &desc);
-                    CloseServiceHandle(hSvc);
-                    wprintf(L"Service installed successfully.\n");
-                } else {
-                    wprintf(L"Failed to install service: %lu\n", GetLastError());
-                }
-                CloseServiceHandle(hSCM);
-            } else if (_wcsicmp(argv[1], L"uninstall") == 0) {
-                SC_HANDLE hSCM = OpenSCManager(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
-                if (!hSCM) return 1;
-                SC_HANDLE hSvc = OpenService(hSCM, SERVICE_NAME, DELETE | SERVICE_STOP);
-                if (hSvc) {
-                    SERVICE_STATUS ss;
-                    ControlService(hSvc, SERVICE_CONTROL_STOP, &ss);
-                    if (DeleteService(hSvc))
-                        wprintf(L"Service uninstalled successfully.\n");
-                    else
-                        wprintf(L"Failed to uninstall: %lu\n", GetLastError());
-                    CloseServiceHandle(hSvc);
-                }
-                CloseServiceHandle(hSCM);
-            }
+        if (_wcsicmp(argv[1], L"uninstall") == 0) {
+            return UninstallService();
         }
     }
-    return 0;
+
+    return 1;
 }
 
-// ---------------------------------------------------------------------------
-// ServiceMain
-// ---------------------------------------------------------------------------
-static void WINAPI ServiceMain(DWORD /*argc*/, LPTSTR* /*argv*/)
+static void WINAPI ServiceMain(DWORD, LPTSTR*)
 {
-    g_svcStatusHandle = RegisterServiceCtrlHandlerEx(
-        SERVICE_NAME, ServiceCtrlHandler, nullptr);
-    if (!g_svcStatusHandle) return;
-
-    SetServiceStatus(SERVICE_START_PENDING);
-
-    g_hStopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-    if (!g_hStopEvent) {
-        SetServiceStatus(SERVICE_STOPPED, GetLastError());
+    g_serviceStatusHandle = RegisterServiceCtrlHandlerExW(kServiceName, ServiceCtrlHandler, nullptr);
+    if (!g_serviceStatusHandle) {
         return;
     }
 
-    SetServiceStatus(SERVICE_RUNNING);
+    SetCurrentServiceStatus(SERVICE_START_PENDING);
 
-    // Launch TrayApp in all existing user sessions
+    g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_stopEvent) {
+        SetCurrentServiceStatus(SERVICE_STOPPED, GetLastError());
+        return;
+    }
+
+    InitializeCriticalSection(&g_processLock);
+    g_processLockInitialized = true;
+
+    if (!InitializeRpcServer()) {
+        if (g_processLockInitialized) {
+            DeleteCriticalSection(&g_processLock);
+            g_processLockInitialized = false;
+        }
+        CloseHandle(g_stopEvent);
+        g_stopEvent = nullptr;
+        SetCurrentServiceStatus(SERVICE_STOPPED, ERROR_GEN_FAILURE);
+        return;
+    }
+
     LaunchTrayAppInAllSessions();
+    SetCurrentServiceStatus(SERVICE_RUNNING);
 
-    // Wait until service is signalled to stop
-    WaitForSingleObject(g_hStopEvent, INFINITE);
+    const RPC_STATUS listenStatus = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, TRUE);
 
-    CloseHandle(g_hStopEvent);
-    SetServiceStatus(SERVICE_STOPPED);
+    SetCurrentServiceStatus(SERVICE_STOP_PENDING);
+    ShutdownRpcServer();
+    TerminateLaunchedProcesses();
+
+    if (g_processLockInitialized) {
+        DeleteCriticalSection(&g_processLock);
+        g_processLockInitialized = false;
+    }
+
+    if (g_stopEvent) {
+        CloseHandle(g_stopEvent);
+        g_stopEvent = nullptr;
+    }
+
+    const DWORD exitCode = (listenStatus == RPC_S_OK || listenStatus == RPC_S_ALREADY_LISTENING)
+        ? NO_ERROR
+        : listenStatus;
+    SetCurrentServiceStatus(SERVICE_STOPPED, exitCode);
 }
 
-// ---------------------------------------------------------------------------
-// Service control handler — handles stop + session change
-// ---------------------------------------------------------------------------
-static DWORD WINAPI ServiceCtrlHandler(DWORD dwControl, DWORD dwEventType,
-                                       LPVOID /*lpEventData*/, LPVOID /*lpContext*/)
+static DWORD WINAPI ServiceCtrlHandler(DWORD control, DWORD eventType, LPVOID eventData, LPVOID)
 {
-    switch (dwControl) {
-    case SERVICE_CONTROL_STOP:
-        SetServiceStatus(SERVICE_STOP_PENDING);
-        SetEvent(g_hStopEvent);
+    switch (control) {
+    case SERVICE_CONTROL_SESSIONCHANGE:
+        if (eventType == WTS_SESSION_LOGON && eventData) {
+            const auto* notification = reinterpret_cast<WTSSESSION_NOTIFICATION*>(eventData);
+            if (notification->dwSessionId != 0) {
+                LaunchTrayAppInSession(notification->dwSessionId);
+            }
+        }
         return NO_ERROR;
 
-    case SERVICE_CONTROL_SESSIONCHANGE:
-        // New session logon — launch TrayApp there
-        if (dwEventType == WTS_SESSION_LOGON) {
-            PWTSSESSION_NOTIFICATION pNotify =
-                reinterpret_cast<PWTSSESSION_NOTIFICATION>(
-                    const_cast<LPVOID>(
-                        reinterpret_cast<const void*>(&dwEventType)));
-            // Safer: get session id from the struct passed via lpEventData
-            // But we re-enumerate all active sessions for reliability
-            LaunchTrayAppInAllSessions();
-        }
+    case SERVICE_CONTROL_STOP:
+    case SERVICE_CONTROL_SHUTDOWN:
         return NO_ERROR;
 
     case SERVICE_CONTROL_INTERROGATE:
@@ -157,99 +159,299 @@ static DWORD WINAPI ServiceCtrlHandler(DWORD dwControl, DWORD dwEventType,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Set service status helper
-// ---------------------------------------------------------------------------
-static void SetServiceStatus(DWORD state, DWORD exitCode)
+static void SetCurrentServiceStatus(DWORD state, DWORD exitCode)
 {
-    g_svcStatus.dwServiceType             = SERVICE_WIN32_OWN_PROCESS;
-    g_svcStatus.dwCurrentState            = state;
-    g_svcStatus.dwWin32ExitCode           = exitCode;
-    g_svcStatus.dwControlsAccepted        = (state == SERVICE_RUNNING)
-        ? (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SESSIONCHANGE)
-        : 0;
-    g_svcStatus.dwCheckPoint              = 0;
-    g_svcStatus.dwWaitHint                = 0;
-    ::SetServiceStatus(g_svcStatusHandle, &g_svcStatus);
+    g_serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    g_serviceStatus.dwCurrentState = state;
+    g_serviceStatus.dwWin32ExitCode = exitCode;
+    g_serviceStatus.dwControlsAccepted = (state == SERVICE_RUNNING) ? SERVICE_ACCEPT_SESSIONCHANGE : 0;
+    g_serviceStatus.dwCheckPoint = 0;
+    g_serviceStatus.dwWaitHint = 0;
+    ::SetServiceStatus(g_serviceStatusHandle, &g_serviceStatus);
 }
 
-// ---------------------------------------------------------------------------
-// Get path to TrayApp.exe (same directory as service exe)
-// ---------------------------------------------------------------------------
-static std::wstring GetTrayAppPath()
+static bool InitializeRpcServer()
 {
-    wchar_t modulePath[MAX_PATH];
-    GetModuleFileName(nullptr, modulePath, MAX_PATH);
-    std::wstring path(modulePath);
-    auto pos = path.find_last_of(L'\\');
-    if (pos != std::wstring::npos)
-        path = path.substr(0, pos + 1);
-    path += TRAYAPP_EXE;
-    return path;
+    RPC_STATUS status = RpcServerUseProtseqEpW(
+        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(kRpcProtocolSequence)),
+        RPC_C_PROTSEQ_MAX_REQS_DEFAULT,
+        reinterpret_cast<RPC_WSTR>(const_cast<wchar_t*>(kRpcEndpoint)),
+        nullptr);
+    if (status != RPC_S_OK) {
+        return false;
+    }
+
+    status = RpcServerRegisterIf2(
+        TrayAppRpc_v1_0_s_ifspec,
+        nullptr,
+        nullptr,
+        RPC_IF_ALLOW_LOCAL_ONLY,
+        RPC_C_LISTEN_MAX_CALLS_DEFAULT,
+        static_cast<unsigned int>(-1),
+        nullptr);
+    return status == RPC_S_OK;
 }
 
-// ---------------------------------------------------------------------------
-// Launch TrayApp.exe in a specific user session (with --hidden)
-// ---------------------------------------------------------------------------
+static void ShutdownRpcServer()
+{
+    RpcServerUnregisterIf(nullptr, nullptr, FALSE);
+}
+
+static void RequestServiceShutdown()
+{
+    if (g_stopEvent) {
+        SetEvent(g_stopEvent);
+    }
+
+    RpcMgmtStopServerListening(nullptr);
+}
+
 static void LaunchTrayAppInSession(DWORD sessionId)
 {
-    HANDLE hToken = nullptr;
-    if (!WTSQueryUserToken(sessionId, &hToken))
-        return;
-
-    HANDLE hDupToken = nullptr;
-    if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, nullptr,
-                          SecurityIdentification, TokenPrimary, &hDupToken)) {
-        CloseHandle(hToken);
+    if (sessionId == 0 || !g_processLockInitialized) {
         return;
     }
 
-    LPVOID pEnv = nullptr;
-    CreateEnvironmentBlock(&pEnv, hDupToken, FALSE);
+    EnterCriticalSection(&g_processLock);
+    CleanupTrackedProcessesLocked();
+    if (HasRunningProcessForSessionLocked(sessionId)) {
+        LeaveCriticalSection(&g_processLock);
+        return;
+    }
+    LeaveCriticalSection(&g_processLock);
 
-    std::wstring appPath = GetTrayAppPath();
-    std::wstring cmdLine = L"\"" + appPath + L"\" --hidden";
+    HANDLE userToken = nullptr;
+    if (!WTSQueryUserToken(sessionId, &userToken)) {
+        return;
+    }
 
-    // Need a writable buffer for CreateProcessAsUser
-    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
-    cmdBuf.push_back(L'\0');
+    HANDLE primaryToken = nullptr;
+    if (!DuplicateTokenEx(
+            userToken,
+            MAXIMUM_ALLOWED,
+            nullptr,
+            SecurityImpersonation,
+            TokenPrimary,
+            &primaryToken)) {
+        CloseHandle(userToken);
+        return;
+    }
 
-    STARTUPINFO si = {};
-    si.cb          = sizeof(si);
-    si.lpDesktop   = const_cast<LPWSTR>(L"winsta0\\default");
-    PROCESS_INFORMATION pi = {};
+    LPVOID environmentBlock = nullptr;
+    CreateEnvironmentBlock(&environmentBlock, primaryToken, FALSE);
 
-    CreateProcessAsUser(
-        hDupToken,
+    const std::wstring appPath = GetSiblingPath(kTrayAppBinaryName);
+    const std::wstring workingDirectory = GetDirectoryName(appPath);
+    const std::wstring commandLine = L"\"" + appPath + L"\" --hidden";
+    std::vector<wchar_t> commandLineBuffer(commandLine.begin(), commandLine.end());
+    commandLineBuffer.push_back(L'\0');
+
+    STARTUPINFOW startupInfo = {};
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
+    startupInfo.dwFlags = STARTF_USESHOWWINDOW;
+    startupInfo.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION processInformation = {};
+    const BOOL created = CreateProcessAsUserW(
+        primaryToken,
         appPath.c_str(),
-        cmdBuf.data(),
-        nullptr, nullptr, FALSE,
-        CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
-        pEnv, nullptr, &si, &pi);
+        commandLineBuffer.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_UNICODE_ENVIRONMENT,
+        environmentBlock,
+        workingDirectory.empty() ? nullptr : workingDirectory.c_str(),
+        &startupInfo,
+        &processInformation);
 
-    if (pi.hProcess) CloseHandle(pi.hProcess);
-    if (pi.hThread)  CloseHandle(pi.hThread);
-    if (pEnv)        DestroyEnvironmentBlock(pEnv);
-    CloseHandle(hDupToken);
-    CloseHandle(hToken);
+    if (environmentBlock) {
+        DestroyEnvironmentBlock(environmentBlock);
+    }
+    CloseHandle(primaryToken);
+    CloseHandle(userToken);
+
+    if (!created) {
+        return;
+    }
+
+    CloseHandle(processInformation.hThread);
+
+    EnterCriticalSection(&g_processLock);
+    CleanupTrackedProcessesLocked();
+    g_launchedProcesses.push_back({ sessionId, processInformation.dwProcessId, processInformation.hProcess });
+    LeaveCriticalSection(&g_processLock);
 }
 
-// ---------------------------------------------------------------------------
-// Enumerate all active user sessions and launch TrayApp in each
-// ---------------------------------------------------------------------------
 static void LaunchTrayAppInAllSessions()
 {
-    PWTS_SESSION_INFO pSessions = nullptr;
-    DWORD count = 0;
-
-    if (!WTSEnumerateSessions(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pSessions, &count))
+    PWTS_SESSION_INFOW sessionInfo = nullptr;
+    DWORD sessionCount = 0;
+    if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessionInfo, &sessionCount)) {
         return;
+    }
 
-    for (DWORD i = 0; i < count; ++i) {
-        if (pSessions[i].State == WTSActive) {
-            LaunchTrayAppInSession(pSessions[i].SessionId);
+    for (DWORD index = 0; index < sessionCount; ++index) {
+        if (sessionInfo[index].SessionId == 0) {
+            continue;
+        }
+
+        LaunchTrayAppInSession(sessionInfo[index].SessionId);
+    }
+
+    WTSFreeMemory(sessionInfo);
+}
+
+static void TerminateLaunchedProcesses()
+{
+    if (!g_processLockInitialized) {
+        return;
+    }
+
+    EnterCriticalSection(&g_processLock);
+    for (LaunchedProcess& processInfo : g_launchedProcesses) {
+        if (processInfo.processHandle) {
+            TerminateProcess(processInfo.processHandle, 0);
+            WaitForSingleObject(processInfo.processHandle, 5000);
+            CloseHandle(processInfo.processHandle);
+            processInfo.processHandle = nullptr;
+        }
+    }
+    g_launchedProcesses.clear();
+    LeaveCriticalSection(&g_processLock);
+}
+
+static void CleanupTrackedProcessesLocked()
+{
+    size_t writeIndex = 0;
+    for (size_t readIndex = 0; readIndex < g_launchedProcesses.size(); ++readIndex) {
+        LaunchedProcess& processInfo = g_launchedProcesses[readIndex];
+        if (!processInfo.processHandle || WaitForSingleObject(processInfo.processHandle, 0) == WAIT_OBJECT_0) {
+            if (processInfo.processHandle) {
+                CloseHandle(processInfo.processHandle);
+            }
+            continue;
+        }
+
+        if (writeIndex != readIndex) {
+            g_launchedProcesses[writeIndex] = processInfo;
+        }
+        ++writeIndex;
+    }
+
+    g_launchedProcesses.resize(writeIndex);
+}
+
+static bool HasRunningProcessForSessionLocked(DWORD sessionId)
+{
+    for (const LaunchedProcess& processInfo : g_launchedProcesses) {
+        if (processInfo.sessionId == sessionId &&
+            processInfo.processHandle &&
+            WaitForSingleObject(processInfo.processHandle, 0) == WAIT_TIMEOUT) {
+            return true;
         }
     }
 
-    WTSFreeMemory(pSessions);
+    return false;
+}
+
+static std::wstring GetSiblingPath(const wchar_t* fileName)
+{
+    std::vector<wchar_t> modulePath(MAX_PATH, L'\0');
+    DWORD length = GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+    while (length == modulePath.size()) {
+        modulePath.resize(modulePath.size() * 2, L'\0');
+        length = GetModuleFileNameW(nullptr, modulePath.data(), static_cast<DWORD>(modulePath.size()));
+    }
+
+    std::wstring fullPath(modulePath.data(), length);
+    const size_t separator = fullPath.find_last_of(L'\\');
+    if (separator != std::wstring::npos) {
+        fullPath.erase(separator + 1);
+    } else {
+        fullPath.clear();
+    }
+
+    fullPath += fileName;
+    return fullPath;
+}
+
+static std::wstring GetDirectoryName(const std::wstring& path)
+{
+    const size_t separator = path.find_last_of(L'\\');
+    if (separator == std::wstring::npos) {
+        return L"";
+    }
+
+    return path.substr(0, separator);
+}
+
+static int InstallService()
+{
+    SC_HANDLE scmHandle = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
+    if (!scmHandle) {
+        return 1;
+    }
+
+    const std::wstring servicePath = GetSiblingPath(L"TrayAppService.exe");
+
+    SC_HANDLE serviceHandle = CreateServiceW(
+        scmHandle,
+        kServiceName,
+        kServiceDisplayName,
+        SERVICE_ALL_ACCESS,
+        SERVICE_WIN32_OWN_PROCESS,
+        SERVICE_AUTO_START,
+        SERVICE_ERROR_NORMAL,
+        servicePath.c_str(),
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr);
+
+    if (!serviceHandle) {
+        const DWORD error = GetLastError();
+        CloseServiceHandle(scmHandle);
+        wprintf(L"Failed to install service: %lu\n", error);
+        return 1;
+    }
+
+    SERVICE_DESCRIPTIONW description = {};
+    description.lpDescription = const_cast<LPWSTR>(kServiceDescription);
+    ChangeServiceConfig2W(serviceHandle, SERVICE_CONFIG_DESCRIPTION, &description);
+
+    CloseServiceHandle(serviceHandle);
+    CloseServiceHandle(scmHandle);
+    wprintf(L"Service installed successfully.\n");
+    return 0;
+}
+
+static int UninstallService()
+{
+    SC_HANDLE scmHandle = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
+    if (!scmHandle) {
+        return 1;
+    }
+
+    SC_HANDLE serviceHandle = OpenServiceW(
+        scmHandle,
+        kServiceName,
+        DELETE | SERVICE_QUERY_STATUS);
+    if (!serviceHandle) {
+        CloseServiceHandle(scmHandle);
+        return 1;
+    }
+
+    const bool deleted = DeleteService(serviceHandle) == TRUE;
+    if (deleted) {
+        wprintf(L"Service uninstalled successfully.\n");
+    } else {
+        wprintf(L"Failed to uninstall service: %lu\n", GetLastError());
+    }
+
+    CloseServiceHandle(serviceHandle);
+    CloseServiceHandle(scmHandle);
+    return deleted ? 0 : 1;
 }
