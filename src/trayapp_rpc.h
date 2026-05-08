@@ -60,8 +60,72 @@ extern "C"{
 /* interface TrayAppRpc */
 /* [unique][version][uuid] */ 
 
+typedef 
+enum TrayAppRpcStatusCode
+    {
+        TRAYAPP_RPC_STATUS_OK	= 0,
+        TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED	= 1,
+        TRAYAPP_RPC_STATUS_INVALID_CREDENTIALS	= 2,
+        TRAYAPP_RPC_STATUS_NETWORK_ERROR	= 3,
+        TRAYAPP_RPC_STATUS_NO_LICENSE	= 4,
+        TRAYAPP_RPC_STATUS_LICENSE_BLOCKED	= 5,
+        TRAYAPP_RPC_STATUS_LICENSE_EXPIRED	= 6,
+        TRAYAPP_RPC_STATUS_ACTIVATION_FAILED	= 7,
+        TRAYAPP_RPC_STATUS_SERVER_ERROR	= 8
+    } 	TrayAppRpcStatusCode;
+
+typedef struct TrayAppOperationResult
+    {
+    TrayAppRpcStatusCode statusCode;
+    wchar_t message[ 256 ];
+    } 	TrayAppOperationResult;
+
+typedef struct TrayAppAuthState
+    {
+    TrayAppRpcStatusCode statusCode;
+    boolean authenticated;
+    boolean antivirusEnabled;
+    wchar_t email[ 256 ];
+    wchar_t message[ 256 ];
+    } 	TrayAppAuthState;
+
+typedef struct TrayAppLicenseState
+    {
+    TrayAppRpcStatusCode statusCode;
+    boolean hasLicense;
+    boolean blocked;
+    boolean expired;
+    boolean antivirusEnabled;
+    hyper expiresAtUnixSeconds;
+    wchar_t expiresAtText[ 64 ];
+    wchar_t message[ 256 ];
+    } 	TrayAppLicenseState;
+
 void TrayAppRpcStopService( 
     /* [in] */ handle_t hBinding);
+
+void TrayAppRpcGetAuthState( 
+    /* [in] */ handle_t hBinding,
+    /* [out] */ TrayAppAuthState *state);
+
+void TrayAppRpcLogin( 
+    /* [in] */ handle_t hBinding,
+    /* [string][in] */ wchar_t *email,
+    /* [string][in] */ wchar_t *password,
+    /* [out] */ TrayAppAuthState *state);
+
+void TrayAppRpcLogout( 
+    /* [in] */ handle_t hBinding,
+    /* [out] */ TrayAppOperationResult *result);
+
+void TrayAppRpcGetLicenseState( 
+    /* [in] */ handle_t hBinding,
+    /* [out] */ TrayAppLicenseState *state);
+
+void TrayAppRpcActivateLicense( 
+    /* [in] */ handle_t hBinding,
+    /* [string][in] */ wchar_t *activationCode,
+    /* [out] */ TrayAppLicenseState *state);
 
 
 
