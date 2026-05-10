@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 enum TrayAppStatusCode {
     kStatusOk = 0,
@@ -39,6 +40,11 @@ struct BackendResult {
     std::wstring message;
 };
 
+struct BinarySignaturePackage {
+    std::vector<unsigned char> manifestBytes;
+    std::vector<unsigned char> dataBytes;
+};
+
 BackendResult BackendLogin(
     const std::wstring& email,
     const std::wstring& password,
@@ -56,3 +62,8 @@ BackendResult BackendActivateLicense(
     const AuthSessionData& authData,
     const std::wstring& activationCode,
     LicenseTicketData* licenseData);
+
+BackendResult BackendDownloadFullAvDatabase(BinarySignaturePackage* package);
+BackendResult BackendDownloadAvRecordsByIds(
+    const std::vector<std::string>& ids,
+    BinarySignaturePackage* package);

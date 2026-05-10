@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <ctime>
 #include <cstdio>
 #include <cstdlib>
@@ -23,11 +24,19 @@ constexpr wchar_t kLoginPath[] = L"/auth/login";
 constexpr wchar_t kRefreshPath[] = L"/auth/refresh";
 constexpr wchar_t kCheckLicensePath[] = L"/licenses/check";
 constexpr wchar_t kActivateLicensePath[] = L"/licenses/activate";
+constexpr wchar_t kBinaryFullPath[] = L"/api/binary/signatures/full";
+constexpr wchar_t kBinaryByIdsPath[] = L"/api/binary/signatures/by-ids";
 constexpr long kDefaultProductId = 1;
 
 struct HttpResponse {
     DWORD statusCode = 0;
     std::wstring body;
+};
+
+struct RawHttpResponse {
+    DWORD statusCode = 0;
+    std::wstring contentType;
+    std::vector<unsigned char> bodyBytes;
 };
 
 std::wstring JsonEscape(const std::wstring& value)
@@ -408,7 +417,16 @@ bool SendJsonRequest(
     const wchar_t* path,
     const std::wstring& requestBody,
     const std::wstring& bearerToken,
-    HttpResponse* response)
+    HttpResponse* response);
+
+bool SendRawRequest(
+    const wchar_t* method,
+    const wchar_t* path,
+    const std::wstring& requestContentType,
+    const std::wstring& acceptType,
+    const std::wstring& bearerToken,
+    const std::vector<unsigned char>& requestBodyBytes,
+    RawHttpResponse* response)
 {
     if (!response) {
         return false;
@@ -442,19 +460,24 @@ bool SendJsonRequest(
         SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
     WinHttpSetOption(request, WINHTTP_OPTION_SECURITY_FLAGS, &securityFlags, sizeof(securityFlags));
 
-    std::wstring headers = L"Content-Type: application/json\r\nAccept: application/json\r\n";
+    std::wstring headers;
+    if (!requestContentType.empty()) {
+        headers += L"Content-Type: " + requestContentType + L"\r\n";
+    }
+    if (!acceptType.empty()) {
+        headers += L"Accept: " + acceptType + L"\r\n";
+    }
     if (!bearerToken.empty()) {
         headers += L"Authorization: Bearer " + bearerToken + L"\r\n";
     }
 
-    const std::string requestBodyUtf8 = WideToUtf8(requestBody);
     BOOL sent = WinHttpSendRequest(
         request,
-        headers.c_str(),
-        static_cast<DWORD>(headers.size()),
-        requestBodyUtf8.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(requestBodyUtf8.data()),
-        static_cast<DWORD>(requestBodyUtf8.size()),
-        static_cast<DWORD>(requestBodyUtf8.size()),
+        headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+        headers.empty() ? 0 : static_cast<DWORD>(headers.size()),
+        requestBodyBytes.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<unsigned char*>(requestBodyBytes.data()),
+        static_cast<DWORD>(requestBodyBytes.size()),
+        static_cast<DWORD>(requestBodyBytes.size()),
         0);
 
     if (!sent) {
@@ -475,7 +498,13 @@ bool SendJsonRequest(
     DWORD statusSize = sizeof(statusCode);
     WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
 
-    std::string responseBytes;
+    wchar_t contentTypeBuffer[512] = {};
+    DWORD contentTypeSize = sizeof(contentTypeBuffer);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_HEADER_NAME_BY_INDEX, contentTypeBuffer, &contentTypeSize, WINHTTP_NO_HEADER_INDEX)) {
+        contentTypeBuffer[0] = L'\0';
+    }
+
+    std::vector<unsigned char> responseBytes;
     DWORD availableSize = 0;
     do {
         availableSize = 0;
@@ -490,7 +519,7 @@ bool SendJsonRequest(
             break;
         }
 
-        std::vector<char> buffer(availableSize);
+        std::vector<unsigned char> buffer(availableSize);
         DWORD downloaded = 0;
         if (!WinHttpReadData(request, buffer.data(), availableSize, &downloaded)) {
             WinHttpCloseHandle(request);
@@ -499,16 +528,144 @@ bool SendJsonRequest(
             return false;
         }
 
-        responseBytes.append(buffer.data(), downloaded);
+        responseBytes.insert(responseBytes.end(), buffer.begin(), buffer.begin() + downloaded);
     } while (availableSize > 0);
 
     response->statusCode = statusCode;
-    response->body = NarrowToWide(responseBytes);
+    response->contentType = contentTypeBuffer;
+    response->bodyBytes = std::move(responseBytes);
 
     WinHttpCloseHandle(request);
     WinHttpCloseHandle(connection);
     WinHttpCloseHandle(session);
     return true;
+}
+
+bool SendJsonRequest(
+    const wchar_t* method,
+    const wchar_t* path,
+    const std::wstring& requestBody,
+    const std::wstring& bearerToken,
+    HttpResponse* response)
+{
+    if (!response) {
+        return false;
+    }
+
+    RawHttpResponse rawResponse = {};
+    const std::string requestBodyUtf8 = WideToUtf8(requestBody);
+    const std::vector<unsigned char> requestBytes(requestBodyUtf8.begin(), requestBodyUtf8.end());
+    if (!SendRawRequest(
+            method,
+            path,
+            L"application/json",
+            L"application/json",
+            bearerToken,
+            requestBytes,
+            &rawResponse)) {
+        return false;
+    }
+
+    response->statusCode = rawResponse.statusCode;
+    response->body = NarrowToWide(std::string(rawResponse.bodyBytes.begin(), rawResponse.bodyBytes.end()));
+    return true;
+}
+
+std::wstring TrimString(const std::wstring& value)
+{
+    size_t begin = 0;
+    while (begin < value.size() && iswspace(value[begin])) {
+        ++begin;
+    }
+    size_t end = value.size();
+    while (end > begin && iswspace(value[end - 1])) {
+        --end;
+    }
+    return value.substr(begin, end - begin);
+}
+
+bool TryExtractBoundary(const std::wstring& contentType, std::string* boundary)
+{
+    if (!boundary) {
+        return false;
+    }
+
+    std::wstring lower = contentType;
+    std::transform(lower.begin(), lower.end(), lower.begin(), towlower);
+    const std::wstring marker = L"boundary=";
+    size_t pos = lower.find(marker);
+    if (pos == std::wstring::npos) {
+        return false;
+    }
+
+    std::wstring rawBoundary = TrimString(contentType.substr(pos + marker.size()));
+    const size_t semicolonPos = rawBoundary.find(L';');
+    if (semicolonPos != std::wstring::npos) {
+        rawBoundary = rawBoundary.substr(0, semicolonPos);
+    }
+    rawBoundary = TrimString(rawBoundary);
+    if (rawBoundary.size() >= 2 && rawBoundary.front() == L'"' && rawBoundary.back() == L'"') {
+        rawBoundary = rawBoundary.substr(1, rawBoundary.size() - 2);
+    }
+
+    if (rawBoundary.empty()) {
+        return false;
+    }
+
+    *boundary = WideToUtf8(rawBoundary);
+    return !boundary->empty();
+}
+
+bool TryExtractMultipartFilePart(
+    const std::vector<unsigned char>& bodyBytes,
+    const std::string& boundary,
+    const std::string& filename,
+    std::vector<unsigned char>* partBytes)
+{
+    if (!partBytes) {
+        return false;
+    }
+
+    const std::string body(reinterpret_cast<const char*>(bodyBytes.data()), bodyBytes.size());
+    const std::string filenameMarker = "filename=\"" + filename + "\"";
+    const size_t headerPos = body.find(filenameMarker);
+    if (headerPos == std::string::npos) {
+        return false;
+    }
+
+    const size_t contentStartPos = body.find("\r\n\r\n", headerPos);
+    if (contentStartPos == std::string::npos) {
+        return false;
+    }
+
+    const size_t dataStart = contentStartPos + 4;
+    const std::string nextBoundaryMarker = "\r\n--" + boundary;
+    const size_t dataEnd = body.find(nextBoundaryMarker, dataStart);
+    if (dataEnd == std::string::npos || dataEnd < dataStart) {
+        return false;
+    }
+
+    partBytes->assign(bodyBytes.begin() + static_cast<long long>(dataStart), bodyBytes.begin() + static_cast<long long>(dataEnd));
+    return true;
+}
+
+BackendResult ParseBinaryPackageResponse(const RawHttpResponse& response, BinarySignaturePackage* package)
+{
+    if (!package) {
+        return { kStatusServerError, L"Binary package target is not provided" };
+    }
+
+    std::string boundary;
+    if (!TryExtractBoundary(response.contentType, &boundary)) {
+        return { kStatusServerError, L"Binary package response has no multipart boundary" };
+    }
+
+    if (!TryExtractMultipartFilePart(response.bodyBytes, boundary, "manifest.bin", &package->manifestBytes) ||
+        !TryExtractMultipartFilePart(response.bodyBytes, boundary, "data.bin", &package->dataBytes)) {
+        return { kStatusServerError, L"Binary package is incomplete" };
+    }
+
+    return {};
 }
 
 BackendResult BuildHttpErrorResult(DWORD statusCode, const std::wstring& responseBody, bool forActivation)
@@ -702,4 +859,63 @@ BackendResult BackendActivateLicense(
     }
 
     return ParseLicenseResponse(response, licenseData);
+}
+
+BackendResult BackendDownloadFullAvDatabase(BinarySignaturePackage* package)
+{
+    RawHttpResponse response = {};
+    if (!SendRawRequest(
+            L"GET",
+            kBinaryFullPath,
+            L"",
+            L"multipart/mixed",
+            L"",
+            {},
+            &response)) {
+        return { kStatusNetworkError, L"Failed to download antivirus database update" };
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        return { kStatusServerError, L"Server returned an invalid antivirus database update response" };
+    }
+
+    return ParseBinaryPackageResponse(response, package);
+}
+
+BackendResult BackendDownloadAvRecordsByIds(
+    const std::vector<std::string>& ids,
+    BinarySignaturePackage* package)
+{
+    if (ids.empty()) {
+        return {};
+    }
+
+    std::wstring body = L"{\"ids\":[";
+    for (size_t index = 0; index < ids.size(); ++index) {
+        if (index != 0) {
+            body += L",";
+        }
+        body += L"\"" + JsonEscape(NarrowToWide(ids[index])) + L"\"";
+    }
+    body += L"]}";
+
+    RawHttpResponse response = {};
+    const std::string requestBodyUtf8 = WideToUtf8(body);
+    const std::vector<unsigned char> requestBytes(requestBodyUtf8.begin(), requestBodyUtf8.end());
+    if (!SendRawRequest(
+            L"POST",
+            kBinaryByIdsPath,
+            L"application/json",
+            L"multipart/mixed",
+            L"",
+            requestBytes,
+            &response)) {
+        return { kStatusNetworkError, L"Failed to download antivirus records from update server" };
+    }
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        return { kStatusServerError, L"Server returned an invalid antivirus record update response" };
+    }
+
+    return ParseBinaryPackageResponse(response, package);
 }

@@ -26,6 +26,20 @@ constexpr wchar_t kServiceDescription[] = L"Launches TrayApp in user sessions an
 constexpr wchar_t kTrayAppBinaryName[] = L"TrayApp.exe";
 constexpr wchar_t kRpcProtocolSequence[] = L"ncalrpc";
 constexpr wchar_t kRpcEndpoint[] = L"TrayAppServiceRpcEndpoint";
+constexpr wchar_t kAvDbDirectory[] = L"avdb";
+constexpr wchar_t kAvDbDefaultDirectory[] = L"avdb\\default";
+constexpr wchar_t kAvDbBackupDirectory[] = L"avdb\\backup";
+constexpr wchar_t kAvDbManifestFile[] = L"avdb\\manifest.bin";
+constexpr wchar_t kAvDbDataFile[] = L"avdb\\data.bin";
+constexpr wchar_t kAvDbDownloadManifestFile[] = L"avdb\\download_manifest.bin";
+constexpr wchar_t kAvDbDownloadDataFile[] = L"avdb\\download_data.bin";
+constexpr wchar_t kAvDbRecoveredManifestFile[] = L"avdb\\recovered_manifest.bin";
+constexpr wchar_t kAvDbRecoveredDataFile[] = L"avdb\\recovered_data.bin";
+constexpr wchar_t kAvDbDefaultManifestFile[] = L"avdb\\default\\manifest.bin";
+constexpr wchar_t kAvDbDefaultDataFile[] = L"avdb\\default\\data.bin";
+constexpr wchar_t kAvDbBackupManifestFile[] = L"avdb\\backup\\manifest.bin";
+constexpr wchar_t kAvDbBackupDataFile[] = L"avdb\\backup\\data.bin";
+constexpr long long kAvDbUpdateIntervalSeconds = 30LL * 60LL;
 
 struct LaunchedProcess {
     DWORD sessionId;
@@ -73,6 +87,7 @@ static bool g_stateLockInitialized = false;
 static std::vector<LaunchedProcess> g_launchedProcesses;
 static std::vector<MonitoredDirectory> g_monitoredDirectories;
 static ServiceState g_serviceState = {};
+static long long g_nextAvDatabaseUpdateUnixSeconds = 0;
 
 static void WINAPI ServiceMain(DWORD argc, LPTSTR* argv);
 static DWORD WINAPI ServiceCtrlHandler(DWORD control, DWORD eventType, LPVOID eventData, LPVOID context);
@@ -90,6 +105,14 @@ static void CleanupTrackedProcessesLocked();
 static bool HasRunningProcessForSessionLocked(DWORD sessionId);
 static std::wstring GetSiblingPath(const wchar_t* fileName);
 static std::wstring GetDirectoryName(const std::wstring& path);
+static bool EnsureDirectoryExists(const std::wstring& path);
+static bool EnsureDefaultAvDatabaseFiles(std::wstring* errorMessage);
+static bool CopyDatabaseFiles(const std::wstring& sourceManifest, const std::wstring& sourceData, const std::wstring& targetManifest, const std::wstring& targetData);
+static bool FileExists(const std::wstring& path);
+static bool WriteBytesToFile(const std::wstring& path, const std::vector<unsigned char>& bytes);
+static void MergeDatabaseRecords(AvDatabase* target, const AvDatabase& source);
+static bool RestoreInvalidRecordsFromServerLocked(const std::vector<std::string>& invalidRecordIds);
+static bool TryUpdateAvBasesFromServerLocked(bool createBackup, bool rollbackOnFailure, std::wstring* errorMessage);
 static int InstallService();
 static int UninstallService();
 static long long GetNowUnixSeconds();
@@ -384,6 +407,8 @@ static void WINAPI ServiceMain(DWORD, LPTSTR*)
     EnterCriticalSection(&g_stateLock);
     ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Войдите в учетную запись");
     ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
+    LoadAvBasesLocked();
+    g_nextAvDatabaseUpdateUnixSeconds = GetNowUnixSeconds() + kAvDbUpdateIntervalSeconds;
     LeaveCriticalSection(&g_stateLock);
 
     if (!InitializeRpcServer()) {
@@ -482,6 +507,7 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
         bool shouldRefreshTokens = false;
         bool shouldRefreshLicense = false;
         bool shouldRunScheduledScan = false;
+        bool shouldUpdateAvDatabase = false;
         unsigned long scheduledIntervalMinutes = 0;
         std::vector<std::wstring> directoriesToScan;
         AvDatabase databaseSnapshot = {};
@@ -496,6 +522,9 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
                 (g_serviceState.license.nextRefreshUnixSeconds != 0) &&
                 (now >= g_serviceState.license.nextRefreshUnixSeconds);
         }
+        shouldUpdateAvDatabase =
+            g_nextAvDatabaseUpdateUnixSeconds != 0 &&
+            now >= g_nextAvDatabaseUpdateUnixSeconds;
 
         if (IsLicenseUsableLocked() && g_serviceState.avDatabase.loaded) {
             if (g_serviceState.scheduledScan.enabled &&
@@ -546,6 +575,17 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
                 ClearLicenseStateLocked(ToRpcStatusCode(licenseResult.statusCode), licenseResult.message);
             }
             LeaveCriticalSection(&g_stateLock);
+        }
+
+        if (shouldUpdateAvDatabase) {
+            EnterCriticalSection(&g_stateLock);
+            std::wstring updateError;
+            const bool updated = TryUpdateAvBasesFromServerLocked(true, true, &updateError);
+            g_nextAvDatabaseUpdateUnixSeconds = GetNowUnixSeconds() + kAvDbUpdateIntervalSeconds;
+            LeaveCriticalSection(&g_stateLock);
+            if (!updated && !updateError.empty()) {
+                AppendDebugLog(L"AV DB scheduled update failed: " + updateError);
+            }
         }
 
         if (shouldRunScheduledScan) {
@@ -861,7 +901,236 @@ static std::wstring GetDirectoryName(const std::wstring& path)
         return L"";
     }
 
+    if (separator == 2 && path.size() >= 3 && path[1] == L':') {
+        return path.substr(0, 3);
+    }
+
     return path.substr(0, separator);
+}
+
+static bool FileExists(const std::wstring& path)
+{
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+static bool EnsureDirectoryExists(const std::wstring& path)
+{
+    if (path.empty()) {
+        return false;
+    }
+
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+
+    const std::wstring parent = GetDirectoryName(path);
+    if (!parent.empty() && parent != path && !EnsureDirectoryExists(parent)) {
+        return false;
+    }
+
+    if (CreateDirectoryW(path.c_str(), nullptr)) {
+        return true;
+    }
+
+    return GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+static bool CopyDatabaseFiles(const std::wstring& sourceManifest, const std::wstring& sourceData, const std::wstring& targetManifest, const std::wstring& targetData)
+{
+    const std::wstring targetManifestDirectory = GetDirectoryName(targetManifest);
+    const std::wstring targetDataDirectory = GetDirectoryName(targetData);
+    if ((!targetManifestDirectory.empty() && !EnsureDirectoryExists(targetManifestDirectory)) ||
+        (!targetDataDirectory.empty() && !EnsureDirectoryExists(targetDataDirectory))) {
+        return false;
+    }
+
+    return CopyFileW(sourceManifest.c_str(), targetManifest.c_str(), FALSE) == TRUE &&
+        CopyFileW(sourceData.c_str(), targetData.c_str(), FALSE) == TRUE;
+}
+
+static bool EnsureDefaultAvDatabaseFiles(std::wstring* errorMessage)
+{
+    const std::wstring defaultDirectory = GetSiblingPath(kAvDbDefaultDirectory);
+    if (!EnsureDirectoryExists(defaultDirectory)) {
+        if (errorMessage) {
+            *errorMessage = L"Не удалось создать директорию баз по умолчанию";
+        }
+        return false;
+    }
+
+    const std::wstring defaultManifestPath = GetSiblingPath(kAvDbDefaultManifestFile);
+    const std::wstring defaultDataPath = GetSiblingPath(kAvDbDefaultDataFile);
+    if (FileExists(defaultManifestPath) && FileExists(defaultDataPath)) {
+        return true;
+    }
+
+    return WriteDefaultAntivirusDatabaseFiles(defaultManifestPath, defaultDataPath, errorMessage);
+}
+
+static bool WriteBytesToFile(const std::wstring& path, const std::vector<unsigned char>& bytes)
+{
+    const std::wstring directory = GetDirectoryName(path);
+    if (!directory.empty() && !EnsureDirectoryExists(directory)) {
+        return false;
+    }
+
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream.is_open()) {
+        return false;
+    }
+
+    if (!bytes.empty()) {
+        stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+
+    return stream.good();
+}
+
+static void MergeDatabaseRecords(AvDatabase* target, const AvDatabase& source)
+{
+    if (!target) {
+        return;
+    }
+
+    for (const auto& sourcePair : source.recordsByPrefix) {
+        std::vector<AvRecord>& targetRecords = target->recordsByPrefix[sourcePair.first];
+        for (const AvRecord& sourceRecord : sourcePair.second) {
+            const auto existing = std::find_if(
+                targetRecords.begin(),
+                targetRecords.end(),
+                [&](const AvRecord& targetRecord) {
+                    return targetRecord.recordId == sourceRecord.recordId;
+                });
+            if (existing == targetRecords.end()) {
+                targetRecords.push_back(sourceRecord);
+                ++target->totalRecordCount;
+            } else {
+                *existing = sourceRecord;
+            }
+        }
+    }
+
+    if (source.releaseUnixSeconds > target->releaseUnixSeconds) {
+        target->releaseUnixSeconds = source.releaseUnixSeconds;
+        target->releaseDateText = source.releaseDateText;
+    }
+}
+
+static bool RestoreInvalidRecordsFromServerLocked(const std::vector<std::string>& invalidRecordIds)
+{
+    if (invalidRecordIds.empty()) {
+        return true;
+    }
+
+    BinarySignaturePackage package = {};
+    const BackendResult downloadResult = BackendDownloadAvRecordsByIds(invalidRecordIds, &package);
+    if (downloadResult.statusCode != kStatusOk) {
+        AppendDebugLog(L"AV DB record recovery failed: " + downloadResult.message);
+        return false;
+    }
+
+    const std::wstring recoveredManifestPath = GetSiblingPath(kAvDbRecoveredManifestFile);
+    const std::wstring recoveredDataPath = GetSiblingPath(kAvDbRecoveredDataFile);
+    if (!WriteBytesToFile(recoveredManifestPath, package.manifestBytes) ||
+        !WriteBytesToFile(recoveredDataPath, package.dataBytes)) {
+        AppendDebugLog(L"AV DB record recovery failed: cannot write temporary recovery files");
+        DeleteFileW(recoveredManifestPath.c_str());
+        DeleteFileW(recoveredDataPath.c_str());
+        return false;
+    }
+
+    AvDatabase recoveredDatabase = {};
+    const AvDatabaseLoadResult recoveredResult =
+        LoadAntivirusDatabaseFromFiles(recoveredManifestPath, recoveredDataPath, &recoveredDatabase);
+    DeleteFileW(recoveredManifestPath.c_str());
+    DeleteFileW(recoveredDataPath.c_str());
+    if (recoveredResult.status != AvDatabaseLoadStatus::Ok) {
+        AppendDebugLog(L"AV DB record recovery failed: " + recoveredResult.message);
+        return false;
+    }
+
+    MergeDatabaseRecords(&g_serviceState.avDatabase, recoveredDatabase);
+    AppendDebugLog(L"AV DB recovered invalid records from server: " + std::to_wstring(recoveredResult.loadedRecordCount));
+    return true;
+}
+
+static bool TryUpdateAvBasesFromServerLocked(bool createBackup, bool rollbackOnFailure, std::wstring* errorMessage)
+{
+    const std::wstring currentManifestPath = GetSiblingPath(kAvDbManifestFile);
+    const std::wstring currentDataPath = GetSiblingPath(kAvDbDataFile);
+    const std::wstring backupManifestPath = GetSiblingPath(kAvDbBackupManifestFile);
+    const std::wstring backupDataPath = GetSiblingPath(kAvDbBackupDataFile);
+    const std::wstring downloadManifestPath = GetSiblingPath(kAvDbDownloadManifestFile);
+    const std::wstring downloadDataPath = GetSiblingPath(kAvDbDownloadDataFile);
+
+    if (createBackup && FileExists(currentManifestPath) && FileExists(currentDataPath)) {
+        if (!CopyDatabaseFiles(currentManifestPath, currentDataPath, backupManifestPath, backupDataPath)) {
+            if (errorMessage) {
+                *errorMessage = L"Не удалось создать резервную копию антивирусных баз";
+            }
+            return false;
+        }
+    }
+
+    BinarySignaturePackage package = {};
+    const BackendResult downloadResult = BackendDownloadFullAvDatabase(&package);
+    if (downloadResult.statusCode != kStatusOk) {
+        if (errorMessage) {
+            *errorMessage = downloadResult.message;
+        }
+        return false;
+    }
+
+    if (!WriteBytesToFile(downloadManifestPath, package.manifestBytes) ||
+        !WriteBytesToFile(downloadDataPath, package.dataBytes)) {
+        if (errorMessage) {
+            *errorMessage = L"Не удалось сохранить обновленные антивирусные базы";
+        }
+        DeleteFileW(downloadManifestPath.c_str());
+        DeleteFileW(downloadDataPath.c_str());
+        return false;
+    }
+
+    AvDatabase updatedDatabase = {};
+    const AvDatabaseLoadResult loadResult =
+        LoadAntivirusDatabaseFromFiles(downloadManifestPath, downloadDataPath, &updatedDatabase);
+    if (loadResult.status != AvDatabaseLoadStatus::Ok) {
+        DeleteFileW(downloadManifestPath.c_str());
+        DeleteFileW(downloadDataPath.c_str());
+        if (rollbackOnFailure && FileExists(backupManifestPath) && FileExists(backupDataPath)) {
+            CopyDatabaseFiles(backupManifestPath, backupDataPath, currentManifestPath, currentDataPath);
+        }
+        if (errorMessage) {
+            *errorMessage = loadResult.message;
+        }
+        return false;
+    }
+
+    if (!CopyDatabaseFiles(downloadManifestPath, downloadDataPath, currentManifestPath, currentDataPath)) {
+        DeleteFileW(downloadManifestPath.c_str());
+        DeleteFileW(downloadDataPath.c_str());
+        if (rollbackOnFailure && FileExists(backupManifestPath) && FileExists(backupDataPath)) {
+            CopyDatabaseFiles(backupManifestPath, backupDataPath, currentManifestPath, currentDataPath);
+        }
+        if (errorMessage) {
+            *errorMessage = L"Не удалось применить обновленные антивирусные базы";
+        }
+        return false;
+    }
+
+    DeleteFileW(downloadManifestPath.c_str());
+    DeleteFileW(downloadDataPath.c_str());
+    g_serviceState.avDatabase = updatedDatabase;
+    if (!loadResult.invalidRecordIds.empty()) {
+        RestoreInvalidRecordsFromServerLocked(loadResult.invalidRecordIds);
+    }
+
+    AppendDebugLog(
+        L"AV DB updated from server, records=" + std::to_wstring(loadResult.loadedRecordCount) +
+        L", skipped=" + std::to_wstring(loadResult.skippedRecordCount));
+    return true;
 }
 
 static int InstallService()
@@ -1069,7 +1338,6 @@ static void ClearLicenseStateLocked(TrayAppRpcStatusCode statusCode, const std::
     g_serviceState.license = {};
     g_serviceState.licenseStatus = statusCode;
     g_serviceState.licenseMessage = message;
-    UnloadAvBasesLocked();
 }
 
 static void ClearAuthStateLocked(TrayAppRpcStatusCode statusCode, const std::wstring& message)
@@ -1121,9 +1389,6 @@ static void UpdateLicenseStateLocked(const LicenseTicketData& licenseData, TrayA
         g_serviceState.license.blocked = false;
         g_serviceState.license.expired = false;
         g_serviceState.licenseMessage.clear();
-        LoadAvBasesLocked();
-    } else {
-        UnloadAvBasesLocked();
     }
 }
 
@@ -1136,8 +1401,106 @@ static void UpdateAuthStateLocked(const AuthSessionData& authData, TrayAppRpcSta
 
 static void LoadAvBasesLocked()
 {
-    if (!g_serviceState.avDatabase.loaded) {
-        LoadEmbeddedAntivirusDatabase(&g_serviceState.avDatabase);
+    const std::wstring currentDirectory = GetSiblingPath(kAvDbDirectory);
+    const std::wstring backupDirectory = GetSiblingPath(kAvDbBackupDirectory);
+    const std::wstring defaultDirectory = GetSiblingPath(kAvDbDefaultDirectory);
+    const std::wstring currentManifestPath = GetSiblingPath(kAvDbManifestFile);
+    const std::wstring currentDataPath = GetSiblingPath(kAvDbDataFile);
+    const std::wstring backupManifestPath = GetSiblingPath(kAvDbBackupManifestFile);
+    const std::wstring backupDataPath = GetSiblingPath(kAvDbBackupDataFile);
+    const std::wstring defaultManifestPath = GetSiblingPath(kAvDbDefaultManifestFile);
+    const std::wstring defaultDataPath = GetSiblingPath(kAvDbDefaultDataFile);
+    bool forceNetworkUpdate = false;
+
+    ClearAntivirusDatabase(&g_serviceState.avDatabase);
+
+    if (!EnsureDirectoryExists(currentDirectory) ||
+        !EnsureDirectoryExists(backupDirectory) ||
+        !EnsureDirectoryExists(defaultDirectory)) {
+        g_serviceState.avDatabase.loaded = false;
+        AppendDebugLog(L"AV DB load failed: cannot create storage directories");
+        return;
+    }
+
+    std::wstring defaultError;
+    if (!EnsureDefaultAvDatabaseFiles(&defaultError)) {
+        g_serviceState.avDatabase.loaded = false;
+        AppendDebugLog(L"AV DB load failed: cannot prepare default database: " + defaultError);
+        return;
+    }
+
+    if (!FileExists(currentManifestPath) || !FileExists(currentDataPath)) {
+        if (!CopyDatabaseFiles(defaultManifestPath, defaultDataPath, currentManifestPath, currentDataPath)) {
+            AppendDebugLog(L"AV DB load warning: failed to initialize current database from defaults");
+        }
+    }
+
+    AvDatabase loadedDatabase = {};
+    AvDatabaseLoadResult loadResult = LoadAntivirusDatabaseFromFiles(currentManifestPath, currentDataPath, &loadedDatabase);
+    if (loadResult.status == AvDatabaseLoadStatus::Ok) {
+        g_serviceState.avDatabase = loadedDatabase;
+        CopyDatabaseFiles(currentManifestPath, currentDataPath, backupManifestPath, backupDataPath);
+        if (!loadResult.invalidRecordIds.empty()) {
+            RestoreInvalidRecordsFromServerLocked(loadResult.invalidRecordIds);
+        }
+        AppendDebugLog(
+            L"AV DB loaded from current files, records=" + std::to_wstring(loadResult.loadedRecordCount) +
+            L", skipped=" + std::to_wstring(loadResult.skippedRecordCount));
+        return;
+    }
+
+    AppendDebugLog(L"AV DB current load failed: " + loadResult.message);
+    forceNetworkUpdate =
+        loadResult.status == AvDatabaseLoadStatus::InvalidManifestSignature ||
+        loadResult.status == AvDatabaseLoadStatus::InvalidManifestFormat ||
+        loadResult.status == AvDatabaseLoadStatus::InvalidDataHash ||
+        loadResult.status == AvDatabaseLoadStatus::InvalidDataFormat;
+
+    if (FileExists(backupManifestPath) && FileExists(backupDataPath)) {
+        if (CopyDatabaseFiles(backupManifestPath, backupDataPath, currentManifestPath, currentDataPath)) {
+            loadedDatabase = {};
+            loadResult = LoadAntivirusDatabaseFromFiles(currentManifestPath, currentDataPath, &loadedDatabase);
+            if (loadResult.status == AvDatabaseLoadStatus::Ok) {
+                g_serviceState.avDatabase = loadedDatabase;
+                if (!loadResult.invalidRecordIds.empty()) {
+                    RestoreInvalidRecordsFromServerLocked(loadResult.invalidRecordIds);
+                }
+                if (forceNetworkUpdate) {
+                    std::wstring updateError;
+                    TryUpdateAvBasesFromServerLocked(true, true, &updateError);
+                }
+                AppendDebugLog(
+                    L"AV DB restored from backup, records=" + std::to_wstring(loadResult.loadedRecordCount) +
+                    L", skipped=" + std::to_wstring(loadResult.skippedRecordCount));
+                return;
+            }
+            AppendDebugLog(L"AV DB backup load failed: " + loadResult.message);
+        } else {
+            AppendDebugLog(L"AV DB backup copy failed");
+        }
+    }
+
+    if (CopyDatabaseFiles(defaultManifestPath, defaultDataPath, currentManifestPath, currentDataPath)) {
+        loadedDatabase = {};
+        loadResult = LoadAntivirusDatabaseFromFiles(currentManifestPath, currentDataPath, &loadedDatabase);
+        if (loadResult.status == AvDatabaseLoadStatus::Ok) {
+            g_serviceState.avDatabase = loadedDatabase;
+            CopyDatabaseFiles(currentManifestPath, currentDataPath, backupManifestPath, backupDataPath);
+            if (!loadResult.invalidRecordIds.empty()) {
+                RestoreInvalidRecordsFromServerLocked(loadResult.invalidRecordIds);
+            }
+            if (forceNetworkUpdate) {
+                std::wstring updateError;
+                TryUpdateAvBasesFromServerLocked(true, true, &updateError);
+            }
+            AppendDebugLog(
+                L"AV DB loaded from default bundle, records=" + std::to_wstring(loadResult.loadedRecordCount) +
+                L", skipped=" + std::to_wstring(loadResult.skippedRecordCount));
+            return;
+        }
+        AppendDebugLog(L"AV DB default load failed: " + loadResult.message);
+    } else {
+        AppendDebugLog(L"AV DB default copy failed");
     }
 }
 
