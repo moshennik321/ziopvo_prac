@@ -25,6 +25,7 @@ target_link_libraries(TrayApp PRIVATE
     user32
     gdi32
     comctl32
+    comdlg32
     advapi32
     rpcrt4
 )
@@ -40,6 +41,7 @@ target_link_options(TrayApp PRIVATE
 
 # ---- Windows Service --------------------------------------------------------
 add_executable(TrayAppService
+    src/antivirus_engine.cpp
     src/backend_client.cpp
     src/service.cpp
     src/trayapp_rpc_s.c
@@ -50,6 +52,8 @@ target_compile_options(TrayAppService PRIVATE /utf-8)
 
 target_link_libraries(TrayAppService PRIVATE
     advapi32
+    bcrypt
+    crypt32
     iphlpapi
     winhttp
     wtsapi32

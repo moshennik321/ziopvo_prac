@@ -1,4 +1,4 @@
-#define UNICODE
+﻿#define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
 #define NTDDI_VERSION   NTDDI_VISTA
@@ -9,11 +9,13 @@
 #include <userenv.h>
 #include <rpc.h>
 
+#include <algorithm>
 #include <ctime>
 #include <fstream>
 #include <string>
 #include <vector>
 
+#include "antivirus_engine.h"
 #include "backend_client.h"
 #include "trayapp_rpc.h"
 
@@ -34,10 +36,29 @@ struct LaunchedProcess {
 struct ServiceState {
     AuthSessionData auth;
     LicenseTicketData license;
+    AvDatabase avDatabase;
+    struct ScheduledScanStateData {
+        bool enabled = false;
+        unsigned long intervalMinutes = 0;
+        long long nextRunUnixSeconds = 0;
+        ScanOutcome lastResult = {};
+        TrayAppRpcStatusCode lastStatus = TRAYAPP_RPC_STATUS_OK;
+        std::wstring message;
+    } scheduledScan;
+    struct MonitoringStateData {
+        ScanOutcome lastResult = {};
+        TrayAppRpcStatusCode lastStatus = TRAYAPP_RPC_STATUS_OK;
+        std::wstring message;
+    } monitoring;
     TrayAppRpcStatusCode authStatus = TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED;
     TrayAppRpcStatusCode licenseStatus = TRAYAPP_RPC_STATUS_NO_LICENSE;
-    std::wstring authMessage = L"Войдите в учетную запись";
-    std::wstring licenseMessage = L"Лицензия отсутствует";
+    std::wstring authMessage = L"Р’РѕР№РґРёС‚Рµ РІ СѓС‡РµС‚РЅСѓСЋ Р·Р°РїРёСЃСЊ";
+    std::wstring licenseMessage = L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚";
+};
+
+struct MonitoredDirectory {
+    std::wstring path;
+    HANDLE changeHandle = nullptr;
 };
 }
 
@@ -50,6 +71,7 @@ static CRITICAL_SECTION g_stateLock = {};
 static bool g_processLockInitialized = false;
 static bool g_stateLockInitialized = false;
 static std::vector<LaunchedProcess> g_launchedProcesses;
+static std::vector<MonitoredDirectory> g_monitoredDirectories;
 static ServiceState g_serviceState = {};
 
 static void WINAPI ServiceMain(DWORD argc, LPTSTR* argv);
@@ -74,6 +96,10 @@ static long long GetNowUnixSeconds();
 static void CopyTextToRpcBuffer(const std::wstring& text, wchar_t* buffer, size_t bufferCount);
 static void FillAuthState(TrayAppAuthState* state);
 static void FillLicenseState(TrayAppLicenseState* state);
+static void FillAvDatabaseInfo(TrayAppAvDatabaseInfo* info);
+static void FillScanResult(const ScanOutcome& outcome, TrayAppRpcStatusCode statusCode, TrayAppScanResult* result);
+static void FillScheduledScanState(TrayAppScheduledScanState* state);
+static void FillMonitoringState(TrayAppMonitoringState* state);
 static void FillOperationResult(TrayAppOperationResult* result, TrayAppRpcStatusCode statusCode, const std::wstring& message);
 static void ClearLicenseStateLocked(TrayAppRpcStatusCode statusCode, const std::wstring& message);
 static void ClearAuthStateLocked(TrayAppRpcStatusCode statusCode, const std::wstring& message);
@@ -81,6 +107,17 @@ static TrayAppRpcStatusCode ToRpcStatusCode(int statusCode);
 static bool IsLicenseUsableLocked();
 static void UpdateLicenseStateLocked(const LicenseTicketData& licenseData, TrayAppRpcStatusCode statusCode, const std::wstring& message);
 static void UpdateAuthStateLocked(const AuthSessionData& authData, TrayAppRpcStatusCode statusCode, const std::wstring& message);
+static void LoadAvBasesLocked();
+static void UnloadAvBasesLocked();
+static TrayAppScanObjectType ToRpcScanObjectType(AvObjectType objectType);
+static bool TryCopyDatabaseForScan(AvDatabase* databaseSnapshot);
+static std::wstring FormatUnixSeconds(long long unixSeconds);
+static void StopAllMonitoringLocked();
+static std::wstring NormalizeDirectoryPath(const std::wstring& path);
+static bool HasMonitoredDirectoryLocked(const std::wstring& normalizedPath);
+static bool AddMonitoredDirectoryLocked(const std::wstring& normalizedPath, std::wstring* errorMessage);
+static bool RemoveMonitoredDirectoryLocked(const std::wstring& normalizedPath, std::wstring* errorMessage);
+static std::wstring BuildMonitoredDirectoriesTextLocked();
 
 extern "C" void TrayAppRpcStopService(handle_t)
 {
@@ -100,14 +137,23 @@ extern "C" void TrayAppRpcLogin(handle_t, wchar_t* email, wchar_t* password, Tra
 
     AuthSessionData authData = {};
     const BackendResult result = BackendLogin(email, password, &authData);
+    LicenseTicketData licenseData = {};
+    BackendResult licenseResult = {};
+    if (result.statusCode == kStatusOk) {
+        licenseResult = BackendCheckLicense(authData, &licenseData);
+    }
 
     EnterCriticalSection(&g_stateLock);
     if (result.statusCode == kStatusOk) {
         UpdateAuthStateLocked(authData, TRAYAPP_RPC_STATUS_OK, L"");
-        ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
+        if (licenseResult.statusCode == kStatusOk) {
+            UpdateLicenseStateLocked(licenseData, TRAYAPP_RPC_STATUS_OK, L"");
+        } else {
+            ClearLicenseStateLocked(ToRpcStatusCode(licenseResult.statusCode), licenseResult.message);
+        }
     } else {
         ClearAuthStateLocked(ToRpcStatusCode(result.statusCode), result.message);
-        ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
+        ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
     }
     LeaveCriticalSection(&g_stateLock);
     FillAuthState(state);
@@ -116,8 +162,8 @@ extern "C" void TrayAppRpcLogin(handle_t, wchar_t* email, wchar_t* password, Tra
 extern "C" void TrayAppRpcLogout(handle_t, TrayAppOperationResult* result)
 {
     EnterCriticalSection(&g_stateLock);
-    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Войдите в учетную запись");
-    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
+    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Р’РѕР№РґРёС‚Рµ РІ СѓС‡РµС‚РЅСѓСЋ Р·Р°РїРёСЃСЊ");
+    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
     LeaveCriticalSection(&g_stateLock);
 
     FillOperationResult(result, TRAYAPP_RPC_STATUS_OK, L"");
@@ -155,6 +201,140 @@ extern "C" void TrayAppRpcActivateLicense(handle_t, wchar_t* activationCode, Tra
     }
     LeaveCriticalSection(&g_stateLock);
     FillLicenseState(state);
+}
+
+extern "C" void TrayAppRpcGetAvDatabaseInfo(handle_t, TrayAppAvDatabaseInfo* info)
+{
+    FillAvDatabaseInfo(info);
+}
+
+extern "C" void TrayAppRpcScanFile(handle_t, wchar_t* path, TrayAppScanResult* result)
+{
+    if (!path || !result) {
+        return;
+    }
+
+    AvDatabase databaseSnapshot = {};
+    EnterCriticalSection(&g_stateLock);
+    const bool canScan = IsLicenseUsableLocked() && g_serviceState.avDatabase.loaded;
+    if (canScan) {
+        databaseSnapshot = g_serviceState.avDatabase;
+    }
+    LeaveCriticalSection(&g_stateLock);
+
+    if (!canScan) {
+        ScanOutcome outcome = {};
+        outcome.completed = false;
+        outcome.targetPath = path;
+        outcome.details = L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµРґРѕСЃС‚СѓРїРЅС‹";
+        FillScanResult(outcome, TRAYAPP_RPC_STATUS_NO_LICENSE, result);
+        return;
+    }
+
+    FillScanResult(ScanFilePath(path, databaseSnapshot), TRAYAPP_RPC_STATUS_OK, result);
+}
+
+extern "C" void TrayAppRpcScanDirectory(handle_t, wchar_t* path, TrayAppScanResult* result)
+{
+    if (!path || !result) {
+        return;
+    }
+
+    AvDatabase databaseSnapshot = {};
+    EnterCriticalSection(&g_stateLock);
+    const bool canScan = IsLicenseUsableLocked() && g_serviceState.avDatabase.loaded;
+    if (canScan) {
+        databaseSnapshot = g_serviceState.avDatabase;
+    }
+    LeaveCriticalSection(&g_stateLock);
+
+    if (!canScan) {
+        ScanOutcome outcome = {};
+        outcome.completed = false;
+        outcome.targetPath = path;
+        outcome.details = L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµРґРѕСЃС‚СѓРїРЅС‹";
+        FillScanResult(outcome, TRAYAPP_RPC_STATUS_NO_LICENSE, result);
+        return;
+    }
+
+    FillScanResult(ScanDirectoryPath(path, databaseSnapshot), TRAYAPP_RPC_STATUS_OK, result);
+}
+
+extern "C" void TrayAppRpcScanFixedDisks(handle_t, TrayAppScanResult* result)
+{
+    if (!result) {
+        return;
+    }
+
+    AvDatabase databaseSnapshot = {};
+    if (!TryCopyDatabaseForScan(&databaseSnapshot)) {
+        ScanOutcome outcome = {};
+        outcome.completed = false;
+        outcome.targetPath = L"Fixed drives";
+        outcome.details = L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµРґРѕСЃС‚СѓРїРЅС‹";
+        FillScanResult(outcome, TRAYAPP_RPC_STATUS_NO_LICENSE, result);
+        return;
+    }
+
+    FillScanResult(ScanFixedDrives(databaseSnapshot), TRAYAPP_RPC_STATUS_OK, result);
+}
+
+extern "C" void TrayAppRpcConfigureScheduledScan(handle_t, unsigned long intervalMinutes, boolean enabled, TrayAppOperationResult* result)
+{
+    EnterCriticalSection(&g_stateLock);
+    g_serviceState.scheduledScan.enabled = (enabled != FALSE);
+    g_serviceState.scheduledScan.intervalMinutes = intervalMinutes;
+    g_serviceState.scheduledScan.nextRunUnixSeconds =
+        (enabled != FALSE && intervalMinutes > 0) ? (GetNowUnixSeconds() + static_cast<long long>(intervalMinutes) * 60LL) : 0;
+    g_serviceState.scheduledScan.message =
+        (enabled != FALSE && intervalMinutes > 0) ? L"РЎРєР°РЅРёСЂРѕРІР°РЅРёРµ РїРѕ СЂР°СЃРїРёСЃР°РЅРёСЋ РІРєР»СЋС‡РµРЅРѕ" : L"РЎРєР°РЅРёСЂРѕРІР°РЅРёРµ РїРѕ СЂР°СЃРїРёСЃР°РЅРёСЋ РѕС‚РєР»СЋС‡РµРЅРѕ";
+    LeaveCriticalSection(&g_stateLock);
+
+    FillOperationResult(result, TRAYAPP_RPC_STATUS_OK, L"");
+}
+
+extern "C" void TrayAppRpcGetScheduledScanState(handle_t, TrayAppScheduledScanState* state)
+{
+    FillScheduledScanState(state);
+}
+
+extern "C" void TrayAppRpcAddMonitoredDirectory(handle_t, wchar_t* path, TrayAppOperationResult* result)
+{
+    if (!path || !result) {
+        return;
+    }
+
+    const std::wstring normalizedPath = NormalizeDirectoryPath(path);
+    std::wstring errorMessage;
+    bool added = false;
+
+    EnterCriticalSection(&g_stateLock);
+    added = AddMonitoredDirectoryLocked(normalizedPath, &errorMessage);
+    LeaveCriticalSection(&g_stateLock);
+
+    FillOperationResult(result, added ? TRAYAPP_RPC_STATUS_OK : TRAYAPP_RPC_STATUS_SERVER_ERROR, errorMessage);
+}
+
+extern "C" void TrayAppRpcRemoveMonitoredDirectory(handle_t, wchar_t* path, TrayAppOperationResult* result)
+{
+    if (!path || !result) {
+        return;
+    }
+
+    const std::wstring normalizedPath = NormalizeDirectoryPath(path);
+    std::wstring errorMessage;
+    bool removed = false;
+
+    EnterCriticalSection(&g_stateLock);
+    removed = RemoveMonitoredDirectoryLocked(normalizedPath, &errorMessage);
+    LeaveCriticalSection(&g_stateLock);
+
+    FillOperationResult(result, removed ? TRAYAPP_RPC_STATUS_OK : TRAYAPP_RPC_STATUS_SERVER_ERROR, errorMessage);
+}
+
+extern "C" void TrayAppRpcGetMonitoringState(handle_t, TrayAppMonitoringState* state)
+{
+    FillMonitoringState(state);
 }
 
 int wmain(int argc, wchar_t* argv[])
@@ -202,8 +382,8 @@ static void WINAPI ServiceMain(DWORD, LPTSTR*)
     g_stateLockInitialized = true;
 
     EnterCriticalSection(&g_stateLock);
-    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Войдите в учетную запись");
-    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
+    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Р’РѕР№РґРёС‚Рµ РІ СѓС‡РµС‚РЅСѓСЋ Р·Р°РїРёСЃСЊ");
+    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
     LeaveCriticalSection(&g_stateLock);
 
     if (!InitializeRpcServer()) {
@@ -244,6 +424,12 @@ static void WINAPI ServiceMain(DWORD, LPTSTR*)
 
     ShutdownRpcServer();
     TerminateLaunchedProcesses();
+
+    if (g_stateLockInitialized) {
+        EnterCriticalSection(&g_stateLock);
+        StopAllMonitoringLocked();
+        LeaveCriticalSection(&g_stateLock);
+    }
 
     if (g_stateLockInitialized) {
         DeleteCriticalSection(&g_stateLock);
@@ -295,6 +481,10 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
         AuthSessionData authSnapshot = {};
         bool shouldRefreshTokens = false;
         bool shouldRefreshLicense = false;
+        bool shouldRunScheduledScan = false;
+        unsigned long scheduledIntervalMinutes = 0;
+        std::vector<std::wstring> directoriesToScan;
+        AvDatabase databaseSnapshot = {};
 
         EnterCriticalSection(&g_stateLock);
         const long long now = GetNowUnixSeconds();
@@ -306,6 +496,28 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
                 (g_serviceState.license.nextRefreshUnixSeconds != 0) &&
                 (now >= g_serviceState.license.nextRefreshUnixSeconds);
         }
+
+        if (IsLicenseUsableLocked() && g_serviceState.avDatabase.loaded) {
+            if (g_serviceState.scheduledScan.enabled &&
+                g_serviceState.scheduledScan.intervalMinutes > 0 &&
+                g_serviceState.scheduledScan.nextRunUnixSeconds != 0 &&
+                now >= g_serviceState.scheduledScan.nextRunUnixSeconds) {
+                shouldRunScheduledScan = true;
+                scheduledIntervalMinutes = g_serviceState.scheduledScan.intervalMinutes;
+                databaseSnapshot = g_serviceState.avDatabase;
+            }
+
+            for (const MonitoredDirectory& directory : g_monitoredDirectories) {
+                if (directory.changeHandle && WaitForSingleObject(directory.changeHandle, 0) == WAIT_OBJECT_0) {
+                    directoriesToScan.push_back(directory.path);
+                    FindNextChangeNotification(directory.changeHandle);
+                }
+            }
+
+            if (!directoriesToScan.empty() && !databaseSnapshot.loaded) {
+                databaseSnapshot = g_serviceState.avDatabase;
+            }
+        }
         LeaveCriticalSection(&g_stateLock);
 
         if (shouldRefreshTokens) {
@@ -316,7 +528,7 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
                 UpdateAuthStateLocked(refreshedAuth, TRAYAPP_RPC_STATUS_OK, L"");
             } else {
                 ClearAuthStateLocked(ToRpcStatusCode(refreshResult.statusCode), refreshResult.message);
-                ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
+                ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
                 LeaveCriticalSection(&g_stateLock);
                 continue;
             }
@@ -333,6 +545,26 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
             } else {
                 ClearLicenseStateLocked(ToRpcStatusCode(licenseResult.statusCode), licenseResult.message);
             }
+            LeaveCriticalSection(&g_stateLock);
+        }
+
+        if (shouldRunScheduledScan) {
+            const ScanOutcome scheduledResult = ScanFixedDrives(databaseSnapshot);
+            EnterCriticalSection(&g_stateLock);
+            g_serviceState.scheduledScan.lastResult = scheduledResult;
+            g_serviceState.scheduledScan.lastStatus = TRAYAPP_RPC_STATUS_OK;
+            g_serviceState.scheduledScan.message = scheduledResult.details;
+            g_serviceState.scheduledScan.nextRunUnixSeconds =
+                GetNowUnixSeconds() + static_cast<long long>(scheduledIntervalMinutes) * 60LL;
+            LeaveCriticalSection(&g_stateLock);
+        }
+
+        for (const std::wstring& directoryPath : directoriesToScan) {
+            const ScanOutcome monitorResult = ScanDirectoryPath(directoryPath, databaseSnapshot);
+            EnterCriticalSection(&g_stateLock);
+            g_serviceState.monitoring.lastResult = monitorResult;
+            g_serviceState.monitoring.lastStatus = TRAYAPP_RPC_STATUS_OK;
+            g_serviceState.monitoring.message = monitorResult.details;
             LeaveCriticalSection(&g_stateLock);
         }
     }
@@ -749,6 +981,79 @@ static void FillLicenseState(TrayAppLicenseState* state)
     LeaveCriticalSection(&g_stateLock);
 }
 
+static void FillAvDatabaseInfo(TrayAppAvDatabaseInfo* info)
+{
+    if (!info) {
+        return;
+    }
+
+    ZeroMemory(info, sizeof(*info));
+    EnterCriticalSection(&g_stateLock);
+    info->statusCode = IsLicenseUsableLocked() ? TRAYAPP_RPC_STATUS_OK : TRAYAPP_RPC_STATUS_NO_LICENSE;
+    info->loaded = g_serviceState.avDatabase.loaded ? TRUE : FALSE;
+    info->releaseUnixSeconds = g_serviceState.avDatabase.releaseUnixSeconds;
+    info->recordCount = static_cast<unsigned long>(g_serviceState.avDatabase.totalRecordCount);
+    CopyTextToRpcBuffer(g_serviceState.avDatabase.releaseDateText, info->releaseDateText, ARRAYSIZE(info->releaseDateText));
+    CopyTextToRpcBuffer(
+        g_serviceState.avDatabase.loaded ? L"" : L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµ Р·Р°РіСЂСѓР¶РµРЅС‹",
+        info->message,
+        ARRAYSIZE(info->message));
+    LeaveCriticalSection(&g_stateLock);
+}
+
+static void FillScanResult(const ScanOutcome& outcome, TrayAppRpcStatusCode statusCode, TrayAppScanResult* result)
+{
+    if (!result) {
+        return;
+    }
+
+    ZeroMemory(result, sizeof(*result));
+    result->statusCode = statusCode;
+    result->completed = outcome.completed ? TRUE : FALSE;
+    result->malicious = outcome.malicious ? TRUE : FALSE;
+    result->scannedFileCount = outcome.scannedFileCount;
+    result->detectedFileCount = outcome.detectedFileCount;
+    result->firstMatchOffset = outcome.firstMatchOffset;
+    result->objectType = ToRpcScanObjectType(outcome.objectType);
+    CopyTextToRpcBuffer(outcome.targetPath, result->targetPath, ARRAYSIZE(result->targetPath));
+    CopyTextToRpcBuffer(outcome.detectedPath, result->detectedPath, ARRAYSIZE(result->detectedPath));
+    CopyTextToRpcBuffer(outcome.details, result->details, ARRAYSIZE(result->details));
+}
+
+static void FillScheduledScanState(TrayAppScheduledScanState* state)
+{
+    if (!state) {
+        return;
+    }
+
+    ZeroMemory(state, sizeof(*state));
+    EnterCriticalSection(&g_stateLock);
+    state->statusCode = g_serviceState.scheduledScan.lastStatus;
+    state->enabled = g_serviceState.scheduledScan.enabled ? TRUE : FALSE;
+    state->intervalMinutes = g_serviceState.scheduledScan.intervalMinutes;
+    state->nextRunUnixSeconds = g_serviceState.scheduledScan.nextRunUnixSeconds;
+    CopyTextToRpcBuffer(FormatUnixSeconds(g_serviceState.scheduledScan.nextRunUnixSeconds), state->nextRunText, ARRAYSIZE(state->nextRunText));
+    FillScanResult(g_serviceState.scheduledScan.lastResult, g_serviceState.scheduledScan.lastStatus, &state->lastResult);
+    CopyTextToRpcBuffer(g_serviceState.scheduledScan.message, state->message, ARRAYSIZE(state->message));
+    LeaveCriticalSection(&g_stateLock);
+}
+
+static void FillMonitoringState(TrayAppMonitoringState* state)
+{
+    if (!state) {
+        return;
+    }
+
+    ZeroMemory(state, sizeof(*state));
+    EnterCriticalSection(&g_stateLock);
+    state->statusCode = g_serviceState.monitoring.lastStatus;
+    state->directoryCount = static_cast<unsigned long>(g_monitoredDirectories.size());
+    CopyTextToRpcBuffer(BuildMonitoredDirectoriesTextLocked(), state->directories, ARRAYSIZE(state->directories));
+    FillScanResult(g_serviceState.monitoring.lastResult, g_serviceState.monitoring.lastStatus, &state->lastResult);
+    CopyTextToRpcBuffer(g_serviceState.monitoring.message, state->message, ARRAYSIZE(state->message));
+    LeaveCriticalSection(&g_stateLock);
+}
+
 static void FillOperationResult(TrayAppOperationResult* result, TrayAppRpcStatusCode statusCode, const std::wstring& message)
 {
     if (!result) {
@@ -764,6 +1069,7 @@ static void ClearLicenseStateLocked(TrayAppRpcStatusCode statusCode, const std::
     g_serviceState.license = {};
     g_serviceState.licenseStatus = statusCode;
     g_serviceState.licenseMessage = message;
+    UnloadAvBasesLocked();
 }
 
 static void ClearAuthStateLocked(TrayAppRpcStatusCode statusCode, const std::wstring& message)
@@ -815,6 +1121,9 @@ static void UpdateLicenseStateLocked(const LicenseTicketData& licenseData, TrayA
         g_serviceState.license.blocked = false;
         g_serviceState.license.expired = false;
         g_serviceState.licenseMessage.clear();
+        LoadAvBasesLocked();
+    } else {
+        UnloadAvBasesLocked();
     }
 }
 
@@ -823,4 +1132,159 @@ static void UpdateAuthStateLocked(const AuthSessionData& authData, TrayAppRpcSta
     g_serviceState.auth = authData;
     g_serviceState.authStatus = statusCode;
     g_serviceState.authMessage = message;
+}
+
+static void LoadAvBasesLocked()
+{
+    if (!g_serviceState.avDatabase.loaded) {
+        LoadEmbeddedAntivirusDatabase(&g_serviceState.avDatabase);
+    }
+}
+
+static void UnloadAvBasesLocked()
+{
+    ClearAntivirusDatabase(&g_serviceState.avDatabase);
+}
+
+static bool TryCopyDatabaseForScan(AvDatabase* databaseSnapshot)
+{
+    if (!databaseSnapshot) {
+        return false;
+    }
+
+    EnterCriticalSection(&g_stateLock);
+    const bool canScan = IsLicenseUsableLocked() && g_serviceState.avDatabase.loaded;
+    if (canScan) {
+        *databaseSnapshot = g_serviceState.avDatabase;
+    }
+    LeaveCriticalSection(&g_stateLock);
+    return canScan;
+}
+
+static std::wstring FormatUnixSeconds(long long unixSeconds)
+{
+    if (unixSeconds <= 0) {
+        return L"";
+    }
+
+    const time_t rawTime = static_cast<time_t>(unixSeconds);
+    tm localTime = {};
+    localtime_s(&localTime, &rawTime);
+
+    wchar_t buffer[64] = {};
+    wcsftime(buffer, ARRAYSIZE(buffer), L"%Y-%m-%d %H:%M:%S", &localTime);
+    return buffer;
+}
+
+static void StopAllMonitoringLocked()
+{
+    for (MonitoredDirectory& directory : g_monitoredDirectories) {
+        if (directory.changeHandle) {
+            FindCloseChangeNotification(directory.changeHandle);
+            directory.changeHandle = nullptr;
+        }
+    }
+    g_monitoredDirectories.clear();
+}
+
+static std::wstring NormalizeDirectoryPath(const std::wstring& path)
+{
+    std::wstring normalized = path;
+    while (!normalized.empty() && (normalized.back() == L'\\' || normalized.back() == L'/')) {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
+static bool HasMonitoredDirectoryLocked(const std::wstring& normalizedPath)
+{
+    return std::any_of(
+        g_monitoredDirectories.begin(),
+        g_monitoredDirectories.end(),
+        [&](const MonitoredDirectory& directory) {
+            return _wcsicmp(directory.path.c_str(), normalizedPath.c_str()) == 0;
+        });
+}
+
+static bool AddMonitoredDirectoryLocked(const std::wstring& normalizedPath, std::wstring* errorMessage)
+{
+    if (normalizedPath.empty()) {
+        if (errorMessage) {
+            *errorMessage = L"РџСѓСЃС‚РѕР№ РїСѓС‚СЊ РґРёСЂРµРєС‚РѕСЂРёРё";
+        }
+        return false;
+    }
+
+    const DWORD attributes = GetFileAttributesW(normalizedPath.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        if (errorMessage) {
+            *errorMessage = L"Р”РёСЂРµРєС‚РѕСЂРёСЏ РЅРµ РЅР°Р№РґРµРЅР°";
+        }
+        return false;
+    }
+
+    if (HasMonitoredDirectoryLocked(normalizedPath)) {
+        if (errorMessage) {
+            *errorMessage = L"";
+        }
+        return true;
+    }
+
+    HANDLE changeHandle = FindFirstChangeNotificationW(
+        normalizedPath.c_str(),
+        TRUE,
+        FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
+    if (changeHandle == INVALID_HANDLE_VALUE || !changeHandle) {
+        if (errorMessage) {
+            *errorMessage = L"РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РїСѓСЃС‚РёС‚СЊ РјРѕРЅРёС‚РѕСЂРёРЅРі РґРёСЂРµРєС‚РѕСЂРёРё";
+        }
+        return false;
+    }
+
+    g_monitoredDirectories.push_back({ normalizedPath, changeHandle });
+    g_serviceState.monitoring.message = L"РњРѕРЅРёС‚РѕСЂРёРЅРі РЅР°СЃС‚СЂРѕРµРЅ";
+    return true;
+}
+
+static bool RemoveMonitoredDirectoryLocked(const std::wstring& normalizedPath, std::wstring* errorMessage)
+{
+    for (auto it = g_monitoredDirectories.begin(); it != g_monitoredDirectories.end(); ++it) {
+        if (_wcsicmp(it->path.c_str(), normalizedPath.c_str()) == 0) {
+            if (it->changeHandle) {
+                FindCloseChangeNotification(it->changeHandle);
+            }
+            g_monitoredDirectories.erase(it);
+            g_serviceState.monitoring.message = L"РњРѕРЅРёС‚РѕСЂРёРЅРі РѕР±РЅРѕРІР»РµРЅ";
+            return true;
+        }
+    }
+
+    if (errorMessage) {
+        *errorMessage = L"Р”РёСЂРµРєС‚РѕСЂРёСЏ РЅРµ РЅР°Р№РґРµРЅР° РІ СЃРїРёСЃРєРµ РјРѕРЅРёС‚РѕСЂРёРЅРіР°";
+    }
+    return false;
+}
+
+static std::wstring BuildMonitoredDirectoriesTextLocked()
+{
+    std::wstring text;
+    for (size_t index = 0; index < g_monitoredDirectories.size(); ++index) {
+        if (index != 0) {
+            text += L"; ";
+        }
+        text += g_monitoredDirectories[index].path;
+    }
+    return text;
+}
+
+static TrayAppScanObjectType ToRpcScanObjectType(AvObjectType objectType)
+{
+    switch (objectType) {
+    case AvObjectType::Pe:
+        return TRAYAPP_SCAN_OBJECT_PE;
+    case AvObjectType::PowerShell:
+        return TRAYAPP_SCAN_OBJECT_POWERSHELL;
+    default:
+        return TRAYAPP_SCAN_OBJECT_UNKNOWN;
+    }
 }
