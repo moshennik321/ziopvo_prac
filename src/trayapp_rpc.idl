@@ -41,6 +41,52 @@ interface TrayAppRpc
         wchar_t message[256];
     } TrayAppLicenseState;
 
+    typedef enum TrayAppScanObjectType {
+        TRAYAPP_SCAN_OBJECT_UNKNOWN = 0,
+        TRAYAPP_SCAN_OBJECT_PE = 1,
+        TRAYAPP_SCAN_OBJECT_POWERSHELL = 2
+    } TrayAppScanObjectType;
+
+    typedef struct TrayAppAvDatabaseInfo {
+        TrayAppRpcStatusCode statusCode;
+        boolean loaded;
+        hyper releaseUnixSeconds;
+        unsigned long recordCount;
+        wchar_t releaseDateText[64];
+        wchar_t message[256];
+    } TrayAppAvDatabaseInfo;
+
+    typedef struct TrayAppScanResult {
+        TrayAppRpcStatusCode statusCode;
+        boolean completed;
+        boolean malicious;
+        unsigned long scannedFileCount;
+        unsigned long detectedFileCount;
+        hyper firstMatchOffset;
+        TrayAppScanObjectType objectType;
+        wchar_t targetPath[512];
+        wchar_t detectedPath[512];
+        wchar_t details[512];
+    } TrayAppScanResult;
+
+    typedef struct TrayAppScheduledScanState {
+        TrayAppRpcStatusCode statusCode;
+        boolean enabled;
+        unsigned long intervalMinutes;
+        hyper nextRunUnixSeconds;
+        wchar_t nextRunText[64];
+        TrayAppScanResult lastResult;
+        wchar_t message[256];
+    } TrayAppScheduledScanState;
+
+    typedef struct TrayAppMonitoringState {
+        TrayAppRpcStatusCode statusCode;
+        unsigned long directoryCount;
+        wchar_t directories[1024];
+        TrayAppScanResult lastResult;
+        wchar_t message[256];
+    } TrayAppMonitoringState;
+
     void TrayAppRpcStopService([in] handle_t hBinding);
     void TrayAppRpcGetAuthState([in] handle_t hBinding, [out] TrayAppAuthState* state);
     void TrayAppRpcLogin(
@@ -54,4 +100,29 @@ interface TrayAppRpc
         [in] handle_t hBinding,
         [in, string] wchar_t* activationCode,
         [out] TrayAppLicenseState* state);
+    void TrayAppRpcGetAvDatabaseInfo([in] handle_t hBinding, [out] TrayAppAvDatabaseInfo* info);
+    void TrayAppRpcScanFile(
+        [in] handle_t hBinding,
+        [in, string] wchar_t* path,
+        [out] TrayAppScanResult* result);
+    void TrayAppRpcScanDirectory(
+        [in] handle_t hBinding,
+        [in, string] wchar_t* path,
+        [out] TrayAppScanResult* result);
+    void TrayAppRpcScanFixedDisks([in] handle_t hBinding, [out] TrayAppScanResult* result);
+    void TrayAppRpcConfigureScheduledScan(
+        [in] handle_t hBinding,
+        [in] unsigned long intervalMinutes,
+        [in] boolean enabled,
+        [out] TrayAppOperationResult* result);
+    void TrayAppRpcGetScheduledScanState([in] handle_t hBinding, [out] TrayAppScheduledScanState* state);
+    void TrayAppRpcAddMonitoredDirectory(
+        [in] handle_t hBinding,
+        [in, string] wchar_t* path,
+        [out] TrayAppOperationResult* result);
+    void TrayAppRpcRemoveMonitoredDirectory(
+        [in] handle_t hBinding,
+        [in, string] wchar_t* path,
+        [out] TrayAppOperationResult* result);
+    void TrayAppRpcGetMonitoringState([in] handle_t hBinding, [out] TrayAppMonitoringState* state);
 }
