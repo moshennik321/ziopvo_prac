@@ -1,4 +1,4 @@
-﻿#define UNICODE
+#define UNICODE
 #define _UNICODE
 #define WIN32_LEAN_AND_MEAN
 #define NTDDI_VERSION   NTDDI_VISTA
@@ -52,8 +52,8 @@ struct ServiceState {
     } monitoring;
     TrayAppRpcStatusCode authStatus = TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED;
     TrayAppRpcStatusCode licenseStatus = TRAYAPP_RPC_STATUS_NO_LICENSE;
-    std::wstring authMessage = L"Р’РѕР№РґРёС‚Рµ РІ СѓС‡РµС‚РЅСѓСЋ Р·Р°РїРёСЃСЊ";
-    std::wstring licenseMessage = L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚";
+    std::wstring authMessage = L"Войдите в учетную запись";
+    std::wstring licenseMessage = L"Лицензия отсутствует";
 };
 
 struct MonitoredDirectory {
@@ -153,7 +153,7 @@ extern "C" void TrayAppRpcLogin(handle_t, wchar_t* email, wchar_t* password, Tra
         }
     } else {
         ClearAuthStateLocked(ToRpcStatusCode(result.statusCode), result.message);
-        ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
+        ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
     }
     LeaveCriticalSection(&g_stateLock);
     FillAuthState(state);
@@ -162,8 +162,8 @@ extern "C" void TrayAppRpcLogin(handle_t, wchar_t* email, wchar_t* password, Tra
 extern "C" void TrayAppRpcLogout(handle_t, TrayAppOperationResult* result)
 {
     EnterCriticalSection(&g_stateLock);
-    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Р’РѕР№РґРёС‚Рµ РІ СѓС‡РµС‚РЅСѓСЋ Р·Р°РїРёСЃСЊ");
-    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
+    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Войдите в учетную запись");
+    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
     LeaveCriticalSection(&g_stateLock);
 
     FillOperationResult(result, TRAYAPP_RPC_STATUS_OK, L"");
@@ -226,7 +226,7 @@ extern "C" void TrayAppRpcScanFile(handle_t, wchar_t* path, TrayAppScanResult* r
         ScanOutcome outcome = {};
         outcome.completed = false;
         outcome.targetPath = path;
-        outcome.details = L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµРґРѕСЃС‚СѓРїРЅС‹";
+        outcome.details = L"Антивирусные базы недоступны";
         FillScanResult(outcome, TRAYAPP_RPC_STATUS_NO_LICENSE, result);
         return;
     }
@@ -252,7 +252,7 @@ extern "C" void TrayAppRpcScanDirectory(handle_t, wchar_t* path, TrayAppScanResu
         ScanOutcome outcome = {};
         outcome.completed = false;
         outcome.targetPath = path;
-        outcome.details = L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµРґРѕСЃС‚СѓРїРЅС‹";
+        outcome.details = L"Антивирусные базы недоступны";
         FillScanResult(outcome, TRAYAPP_RPC_STATUS_NO_LICENSE, result);
         return;
     }
@@ -271,7 +271,7 @@ extern "C" void TrayAppRpcScanFixedDisks(handle_t, TrayAppScanResult* result)
         ScanOutcome outcome = {};
         outcome.completed = false;
         outcome.targetPath = L"Fixed drives";
-        outcome.details = L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµРґРѕСЃС‚СѓРїРЅС‹";
+        outcome.details = L"Антивирусные базы недоступны";
         FillScanResult(outcome, TRAYAPP_RPC_STATUS_NO_LICENSE, result);
         return;
     }
@@ -287,7 +287,7 @@ extern "C" void TrayAppRpcConfigureScheduledScan(handle_t, unsigned long interva
     g_serviceState.scheduledScan.nextRunUnixSeconds =
         (enabled != FALSE && intervalMinutes > 0) ? (GetNowUnixSeconds() + static_cast<long long>(intervalMinutes) * 60LL) : 0;
     g_serviceState.scheduledScan.message =
-        (enabled != FALSE && intervalMinutes > 0) ? L"РЎРєР°РЅРёСЂРѕРІР°РЅРёРµ РїРѕ СЂР°СЃРїРёСЃР°РЅРёСЋ РІРєР»СЋС‡РµРЅРѕ" : L"РЎРєР°РЅРёСЂРѕРІР°РЅРёРµ РїРѕ СЂР°СЃРїРёСЃР°РЅРёСЋ РѕС‚РєР»СЋС‡РµРЅРѕ";
+        (enabled != FALSE && intervalMinutes > 0) ? L"Сканирование по расписанию включено" : L"Сканирование по расписанию отключено";
     LeaveCriticalSection(&g_stateLock);
 
     FillOperationResult(result, TRAYAPP_RPC_STATUS_OK, L"");
@@ -382,8 +382,8 @@ static void WINAPI ServiceMain(DWORD, LPTSTR*)
     g_stateLockInitialized = true;
 
     EnterCriticalSection(&g_stateLock);
-    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Р’РѕР№РґРёС‚Рµ РІ СѓС‡РµС‚РЅСѓСЋ Р·Р°РїРёСЃСЊ");
-    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
+    ClearAuthStateLocked(TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED, L"Войдите в учетную запись");
+    ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
     LeaveCriticalSection(&g_stateLock);
 
     if (!InitializeRpcServer()) {
@@ -528,7 +528,7 @@ static DWORD WINAPI BackgroundWorkerThread(LPVOID)
                 UpdateAuthStateLocked(refreshedAuth, TRAYAPP_RPC_STATUS_OK, L"");
             } else {
                 ClearAuthStateLocked(ToRpcStatusCode(refreshResult.statusCode), refreshResult.message);
-                ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚");
+                ClearLicenseStateLocked(TRAYAPP_RPC_STATUS_NO_LICENSE, L"Лицензия отсутствует");
                 LeaveCriticalSection(&g_stateLock);
                 continue;
             }
@@ -995,7 +995,7 @@ static void FillAvDatabaseInfo(TrayAppAvDatabaseInfo* info)
     info->recordCount = static_cast<unsigned long>(g_serviceState.avDatabase.totalRecordCount);
     CopyTextToRpcBuffer(g_serviceState.avDatabase.releaseDateText, info->releaseDateText, ARRAYSIZE(info->releaseDateText));
     CopyTextToRpcBuffer(
-        g_serviceState.avDatabase.loaded ? L"" : L"РђРЅС‚РёРІРёСЂСѓСЃРЅС‹Рµ Р±Р°Р·С‹ РЅРµ Р·Р°РіСЂСѓР¶РµРЅС‹",
+        g_serviceState.avDatabase.loaded ? L"" : L"Антивирусные базы не загружены",
         info->message,
         ARRAYSIZE(info->message));
     LeaveCriticalSection(&g_stateLock);
@@ -1210,7 +1210,7 @@ static bool AddMonitoredDirectoryLocked(const std::wstring& normalizedPath, std:
 {
     if (normalizedPath.empty()) {
         if (errorMessage) {
-            *errorMessage = L"РџСѓСЃС‚РѕР№ РїСѓС‚СЊ РґРёСЂРµРєС‚РѕСЂРёРё";
+            *errorMessage = L"Пустой путь директории";
         }
         return false;
     }
@@ -1218,7 +1218,7 @@ static bool AddMonitoredDirectoryLocked(const std::wstring& normalizedPath, std:
     const DWORD attributes = GetFileAttributesW(normalizedPath.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
         if (errorMessage) {
-            *errorMessage = L"Р”РёСЂРµРєС‚РѕСЂРёСЏ РЅРµ РЅР°Р№РґРµРЅР°";
+            *errorMessage = L"Директория не найдена";
         }
         return false;
     }
@@ -1236,13 +1236,13 @@ static bool AddMonitoredDirectoryLocked(const std::wstring& normalizedPath, std:
         FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
     if (changeHandle == INVALID_HANDLE_VALUE || !changeHandle) {
         if (errorMessage) {
-            *errorMessage = L"РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РїСѓСЃС‚РёС‚СЊ РјРѕРЅРёС‚РѕСЂРёРЅРі РґРёСЂРµРєС‚РѕСЂРёРё";
+            *errorMessage = L"Не удалось запустить мониторинг директории";
         }
         return false;
     }
 
     g_monitoredDirectories.push_back({ normalizedPath, changeHandle });
-    g_serviceState.monitoring.message = L"РњРѕРЅРёС‚РѕСЂРёРЅРі РЅР°СЃС‚СЂРѕРµРЅ";
+    g_serviceState.monitoring.message = L"Мониторинг настроен";
     return true;
 }
 
@@ -1254,13 +1254,13 @@ static bool RemoveMonitoredDirectoryLocked(const std::wstring& normalizedPath, s
                 FindCloseChangeNotification(it->changeHandle);
             }
             g_monitoredDirectories.erase(it);
-            g_serviceState.monitoring.message = L"РњРѕРЅРёС‚РѕСЂРёРЅРі РѕР±РЅРѕРІР»РµРЅ";
+            g_serviceState.monitoring.message = L"Мониторинг обновлен";
             return true;
         }
     }
 
     if (errorMessage) {
-        *errorMessage = L"Р”РёСЂРµРєС‚РѕСЂРёСЏ РЅРµ РЅР°Р№РґРµРЅР° РІ СЃРїРёСЃРєРµ РјРѕРЅРёС‚РѕСЂРёРЅРіР°";
+        *errorMessage = L"Директория не найдена в списке мониторинга";
     }
     return false;
 }
@@ -1288,3 +1288,5 @@ static TrayAppScanObjectType ToRpcScanObjectType(AvObjectType objectType)
         return TRAYAPP_SCAN_OBJECT_UNKNOWN;
     }
 }
+
+

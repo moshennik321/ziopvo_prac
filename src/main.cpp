@@ -36,21 +36,21 @@ const wchar_t* StatusCodeToMessage(TrayAppRpcStatusCode statusCode)
     case TRAYAPP_RPC_STATUS_OK:
         return L"";
     case TRAYAPP_RPC_STATUS_NOT_AUTHENTICATED:
-        return L"Р’РѕР№РґРёС‚Рµ РІ СѓС‡РµС‚РЅСѓСЋ Р·Р°РїРёСЃСЊ";
+        return L"Войдите в учетную запись";
     case TRAYAPP_RPC_STATUS_INVALID_CREDENTIALS:
-        return L"РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ Р°СѓС‚РµРЅС‚РёС„РёРєР°С†РёСЋ";
+        return L"Не удалось выполнить аутентификацию";
     case TRAYAPP_RPC_STATUS_NETWORK_ERROR:
-        return L"РЎРµСЂРІРµСЂ РЅРµРґРѕСЃС‚СѓРїРµРЅ";
+        return L"Сервер недоступен";
     case TRAYAPP_RPC_STATUS_NO_LICENSE:
-        return L"Р›РёС†РµРЅР·РёСЏ РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚";
+        return L"Лицензия отсутствует";
     case TRAYAPP_RPC_STATUS_LICENSE_BLOCKED:
-        return L"Р›РёС†РµРЅР·РёСЏ Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅР°";
+        return L"Лицензия заблокирована";
     case TRAYAPP_RPC_STATUS_LICENSE_EXPIRED:
-        return L"РЎСЂРѕРє РґРµР№СЃС‚РІРёСЏ Р»РёС†РµРЅР·РёРё РёСЃС‚РµРє";
+        return L"Срок действия лицензии истек";
     case TRAYAPP_RPC_STATUS_ACTIVATION_FAILED:
-        return L"РќРµ СѓРґР°Р»РѕСЃСЊ Р°РєС‚РёРІРёСЂРѕРІР°С‚СЊ РїСЂРѕРґСѓРєС‚";
+        return L"Не удалось активировать продукт";
     default:
-        return L"Р’РЅСѓС‚СЂРµРЅРЅСЏСЏ РѕС€РёР±РєР° СЃР»СѓР¶Р±С‹";
+        return L"Внутренняя ошибка службы";
     }
 }
 }
@@ -620,14 +620,14 @@ static void CreateUiControls(HWND hWnd)
     g_dbLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_DB_LABEL), g_hInst, nullptr);
     g_emailEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_EMAIL_EDIT), g_hInst, nullptr);
     g_passwordEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_PASSWORD, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_PASSWORD_EDIT), g_hInst, nullptr);
-    g_loginButton = CreateWindowW(L"BUTTON", L"Р’РѕР№С‚Рё", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON), g_hInst, nullptr);
+    g_loginButton = CreateWindowW(L"BUTTON", L"Войти", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_LOGIN_BUTTON), g_hInst, nullptr);
     g_activateEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_ACTIVATE_EDIT), g_hInst, nullptr);
-    g_activateButton = CreateWindowW(L"BUTTON", L"РђРєС‚РёРІРёСЂРѕРІР°С‚СЊ", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_ACTIVATE_BUTTON), g_hInst, nullptr);
-    g_logoutButton = CreateWindowW(L"BUTTON", L"Р’С‹Р№С‚Рё РёР· Р°РєРєР°СѓРЅС‚Р°", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_LOGOUT_BUTTON), g_hInst, nullptr);
+    g_activateButton = CreateWindowW(L"BUTTON", L"Активировать", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_ACTIVATE_BUTTON), g_hInst, nullptr);
+    g_logoutButton = CreateWindowW(L"BUTTON", L"Выйти из аккаунта", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_LOGOUT_BUTTON), g_hInst, nullptr);
     g_scanFileEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_FILE_EDIT), g_hInst, nullptr);
-    g_scanFileButton = CreateWindowW(L"BUTTON", L"РЎРєР°РЅРёСЂРѕРІР°С‚СЊ С„Р°Р№Р»", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_FILE_BTN), g_hInst, nullptr);
+    g_scanFileButton = CreateWindowW(L"BUTTON", L"Сканировать файл", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_FILE_BTN), g_hInst, nullptr);
     g_scanDirEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_DIR_EDIT), g_hInst, nullptr);
-    g_scanDirButton = CreateWindowW(L"BUTTON", L"РЎРєР°РЅРёСЂРѕРІР°С‚СЊ РїР°РїРєСѓ", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_DIR_BTN), g_hInst, nullptr);
+    g_scanDirButton = CreateWindowW(L"BUTTON", L"Сканировать папку", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_DIR_BTN), g_hInst, nullptr);
     g_scanFixedButton = CreateWindowW(L"BUTTON", L"Scan fixed disks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_FIXED_BTN), g_hInst, nullptr);
     g_scheduleLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_LABEL), g_hInst, nullptr);
     g_scheduleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"30", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_EDIT), g_hInst, nullptr);
@@ -736,7 +736,7 @@ static void RefreshStateFromService()
 
     if (!GetAuthStateViaRpc(&g_authState)) {
         g_authState.statusCode = TRAYAPP_RPC_STATUS_NETWORK_ERROR;
-        lstrcpynW(g_authState.message, L"РЎР»СѓР¶Р±Р° РЅРµРґРѕСЃС‚СѓРїРЅР°", ARRAYSIZE(g_authState.message));
+        lstrcpynW(g_authState.message, L"Служба недоступна", ARRAYSIZE(g_authState.message));
         UpdateUiFromState();
         return;
     }
@@ -744,11 +744,11 @@ static void RefreshStateFromService()
     if (g_authState.authenticated) {
         if (!GetLicenseStateViaRpc(&g_licenseState)) {
             g_licenseState.statusCode = TRAYAPP_RPC_STATUS_NETWORK_ERROR;
-            lstrcpynW(g_licenseState.message, L"РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ СЃС‚Р°С‚СѓСЃ Р»РёС†РµРЅР·РёРё", ARRAYSIZE(g_licenseState.message));
+            lstrcpynW(g_licenseState.message, L"Не удалось получить статус лицензии", ARRAYSIZE(g_licenseState.message));
         }
         if (!GetAvDatabaseInfoViaRpc(&g_avDatabaseInfo)) {
             g_avDatabaseInfo.statusCode = TRAYAPP_RPC_STATUS_NETWORK_ERROR;
-            lstrcpynW(g_avDatabaseInfo.message, L"РќРµ СѓРґР°Р»РѕСЃСЊ РїРѕР»СѓС‡РёС‚СЊ РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ Р±Р°Р·Р°С…", ARRAYSIZE(g_avDatabaseInfo.message));
+            lstrcpynW(g_avDatabaseInfo.message, L"Не удалось получить информацию о базах", ARRAYSIZE(g_avDatabaseInfo.message));
         }
         GetScheduledScanStateViaRpc(&g_scheduledScanState);
         GetMonitoringStateViaRpc(&g_monitoringState);
@@ -765,7 +765,7 @@ static void UpdateUiFromState()
 {
     std::wstring statusText;
     if (g_authState.authenticated) {
-        statusText = L"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ Р°СѓС‚РµРЅС‚РёС„РёС†РёСЂРѕРІР°РЅ";
+        statusText = L"Пользователь аутентифицирован";
     } else {
         statusText = g_authState.message[0] ? g_authState.message : StatusCodeToMessage(g_authState.statusCode);
     }
@@ -780,18 +780,18 @@ static void UpdateUiFromState()
     SetWindowTextW(g_statusLabel, statusText.c_str());
 
     std::wstring userText = g_authState.authenticated
-        ? (std::wstring(L"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ: ") + g_authState.email)
-        : L"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ Р°СѓС‚РµРЅС‚РёС„РёС†РёСЂРѕРІР°РЅ";
+        ? (std::wstring(L"Пользователь: ") + g_authState.email)
+        : L"Пользователь не аутентифицирован";
     SetWindowTextW(g_userLabel, userText.c_str());
 
     std::wstring licenseText;
     if (g_authState.authenticated && g_licenseState.hasLicense && !g_licenseState.blocked && !g_licenseState.expired) {
-        licenseText = L"Р›РёС†РµРЅР·РёСЏ Р°РєС‚РёРІРЅР° РґРѕ: ";
+        licenseText = L"Лицензия активна до: ";
         licenseText += g_licenseState.expiresAtText;
     } else {
         const wchar_t* licenseMessage = g_licenseState.message[0] ? g_licenseState.message : StatusCodeToMessage(g_licenseState.statusCode);
-        licenseText = L"Р›РёС†РµРЅР·РёСЏ: ";
-        licenseText += (*licenseMessage != 0) ? licenseMessage : L"РѕС‚СЃСѓС‚СЃС‚РІСѓРµС‚";
+        licenseText = L"Лицензия: ";
+        licenseText += (*licenseMessage != 0) ? licenseMessage : L"отсутствует";
     }
     SetWindowTextW(g_licenseLabel, licenseText.c_str());
 
@@ -799,50 +799,50 @@ static void UpdateUiFromState()
         (g_licenseState.hasLicense != FALSE) &&
         (g_licenseState.blocked == FALSE) &&
         (g_licenseState.expired == FALSE);
-    SetWindowTextW(g_avLabel, antivirusEnabled ? L"Р¤СѓРЅРєС†РёРѕРЅР°Р»СЊРЅРѕСЃС‚СЊ Р°РЅС‚РёРІРёСЂСѓСЃР° СЂР°Р·Р±Р»РѕРєРёСЂРѕРІР°РЅР°" : L"Р¤СѓРЅРєС†РёРѕРЅР°Р»СЊРЅРѕСЃС‚СЊ Р°РЅС‚РёРІРёСЂСѓСЃР° Р·Р°Р±Р»РѕРєРёСЂРѕРІР°РЅР°");
+    SetWindowTextW(g_avLabel, antivirusEnabled ? L"Функциональность антивируса разблокирована" : L"Функциональность антивируса заблокирована");
 
-    std::wstring dbText = L"Р‘Р°Р·С‹: ";
+    std::wstring dbText = L"Базы: ";
     if (g_avDatabaseInfo.loaded) {
-        dbText += L"РІС‹РїСѓСЃРє ";
+        dbText += L"выпуск ";
         dbText += g_avDatabaseInfo.releaseDateText;
-        dbText += L", Р·Р°РїРёСЃРµР№: ";
+        dbText += L", записей: ";
         dbText += std::to_wstring(g_avDatabaseInfo.recordCount);
     } else {
-        dbText += (g_avDatabaseInfo.message[0] != 0) ? g_avDatabaseInfo.message : L"РЅРµ Р·Р°РіСЂСѓР¶РµРЅС‹";
+        dbText += (g_avDatabaseInfo.message[0] != 0) ? g_avDatabaseInfo.message : L"не загружены";
     }
     SetWindowTextW(g_dbLabel, dbText.c_str());
 
-    std::wstring scheduleText = L"Schedule: ";
+    std::wstring scheduleText = L"Расписание: ";
     if (g_scheduledScanState.enabled) {
         scheduleText += L"enabled, every ";
         scheduleText += std::to_wstring(g_scheduledScanState.intervalMinutes);
         scheduleText += L" min";
         if (g_scheduledScanState.nextRunText[0] != 0) {
-            scheduleText += L", next run ";
+            scheduleText += L", следующий запуск ";
             scheduleText += g_scheduledScanState.nextRunText;
         }
         if (g_scheduledScanState.lastResult.scannedFileCount != 0 || g_scheduledScanState.lastResult.detectedFileCount != 0) {
-            scheduleText += L", last scan ";
+            scheduleText += L", последняя проверка ";
             scheduleText += std::to_wstring(g_scheduledScanState.lastResult.scannedFileCount);
             scheduleText += L"/";
             scheduleText += std::to_wstring(g_scheduledScanState.lastResult.detectedFileCount);
         }
     } else {
-        scheduleText += L"disabled";
+        scheduleText += L"отключено";
     }
     SetWindowTextW(g_scheduleLabel, scheduleText.c_str());
 
-    std::wstring monitorText = L"Monitoring: ";
+    std::wstring monitorText = L"Мониторинг: ";
     monitorText += std::to_wstring(g_monitoringState.directoryCount);
-    monitorText += L" directories";
+    monitorText += L" директорий";
     if (g_monitoringState.directories[0] != 0) {
         monitorText += L" [";
         monitorText += g_monitoringState.directories;
         monitorText += L"]";
     }
     if (g_monitoringState.lastResult.targetPath[0] != 0) {
-        monitorText += L", last: ";
-        monitorText += g_monitoringState.lastResult.malicious ? L"detected" : L"clean";
+        monitorText += L", последнее: ";
+        monitorText += (g_monitoringState.lastResult.malicious ? L"обнаружено" : L"чисто");
     }
     SetWindowTextW(g_monitorLabel, monitorText.c_str());
 
@@ -871,7 +871,7 @@ static void UpdateUiFromState()
 static void ShowRpcFailureMessage(const wchar_t* action)
 {
     std::wstring message = action;
-    message += L": СЃР»СѓР¶Р±Р° РЅРµРґРѕСЃС‚СѓРїРЅР°";
+    message += L": служба недоступна";
     MessageBoxW(g_hWnd, message.c_str(), kAppTitle, MB_ICONERROR | MB_OK);
 }
 
@@ -881,13 +881,13 @@ static void HandleLogin()
     const std::wstring password = GetControlText(g_passwordEdit);
 
     if (email.empty() || password.empty()) {
-        MessageBoxW(g_hWnd, L"Р’РІРµРґРёС‚Рµ email Рё РїР°СЂРѕР»СЊ", kAppTitle, MB_ICONWARNING | MB_OK);
+        MessageBoxW(g_hWnd, L"Введите email и пароль", kAppTitle, MB_ICONWARNING | MB_OK);
         return;
     }
 
     TrayAppAuthState authState = {};
     if (!LoginViaRpc(email, password, &authState)) {
-        ShowRpcFailureMessage(L"РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ РІС…РѕРґ");
+        ShowRpcFailureMessage(L"Не удалось выполнить вход");
         return;
     }
 
@@ -907,13 +907,13 @@ static void HandleActivate()
 {
     const std::wstring activationCode = GetControlText(g_activateEdit);
     if (activationCode.empty()) {
-        MessageBoxW(g_hWnd, L"Р’РІРµРґРёС‚Рµ РєРѕРґ Р°РєС‚РёРІР°С†РёРё", kAppTitle, MB_ICONWARNING | MB_OK);
+        MessageBoxW(g_hWnd, L"Введите код активации", kAppTitle, MB_ICONWARNING | MB_OK);
         return;
     }
 
     TrayAppLicenseState licenseState = {};
     if (!ActivateLicenseViaRpc(activationCode, &licenseState)) {
-        ShowRpcFailureMessage(L"РќРµ СѓРґР°Р»РѕСЃСЊ Р°РєС‚РёРІРёСЂРѕРІР°С‚СЊ РїСЂРѕРґСѓРєС‚");
+        ShowRpcFailureMessage(L"Не удалось активировать продукт");
         return;
     }
 
@@ -934,7 +934,7 @@ static void HandleLogout()
 {
     TrayAppOperationResult result = {};
     if (!LogoutViaRpc(&result)) {
-        ShowRpcFailureMessage(L"РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ РІС‹С…РѕРґ");
+        ShowRpcFailureMessage(L"Не удалось выполнить выход");
         return;
     }
 
