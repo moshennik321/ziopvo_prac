@@ -29,6 +29,10 @@ constexpr UINT_PTR kTrayRetryTimerId = 2;
 constexpr UINT kStateRefreshIntervalMs = 5000;
 constexpr UINT kTrayRetryIntervalMs = 1000;
 constexpr UINT WM_APP_INITIALIZE = WM_APP + 1;
+constexpr int kDefaultWindowWidth = 1120;
+constexpr int kDefaultWindowHeight = 920;
+constexpr int kMinimumWindowWidth = 960;
+constexpr int kMinimumWindowHeight = 840;
 
 const wchar_t* StatusCodeToMessage(TrayAppRpcStatusCode statusCode)
 {
@@ -205,8 +209,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance,
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        980,
-        860,
+        kDefaultWindowWidth,
+        kDefaultWindowHeight,
         nullptr,
         CreateMainMenu(),
         hInstance,
@@ -628,15 +632,15 @@ static void CreateUiControls(HWND hWnd)
     g_scanFileButton = CreateWindowW(L"BUTTON", L"Сканировать файл", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_FILE_BTN), g_hInst, nullptr);
     g_scanDirEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_DIR_EDIT), g_hInst, nullptr);
     g_scanDirButton = CreateWindowW(L"BUTTON", L"Сканировать папку", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_DIR_BTN), g_hInst, nullptr);
-    g_scanFixedButton = CreateWindowW(L"BUTTON", L"Scan fixed disks", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_FIXED_BTN), g_hInst, nullptr);
+    g_scanFixedButton = CreateWindowW(L"BUTTON", L"Сканировать диски", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_FIXED_BTN), g_hInst, nullptr);
     g_scheduleLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_LABEL), g_hInst, nullptr);
     g_scheduleEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"30", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_EDIT), g_hInst, nullptr);
-    g_scheduleEnableButton = CreateWindowW(L"BUTTON", L"Enable schedule", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_ON_BTN), g_hInst, nullptr);
-    g_scheduleDisableButton = CreateWindowW(L"BUTTON", L"Disable schedule", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_OFF_BTN), g_hInst, nullptr);
+    g_scheduleEnableButton = CreateWindowW(L"BUTTON", L"Включить расписание", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_ON_BTN), g_hInst, nullptr);
+    g_scheduleDisableButton = CreateWindowW(L"BUTTON", L"Выключить расписание", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCHEDULE_OFF_BTN), g_hInst, nullptr);
     g_monitorLabel = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_MONITOR_LABEL), g_hInst, nullptr);
     g_monitorEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_MONITOR_EDIT), g_hInst, nullptr);
-    g_monitorAddButton = CreateWindowW(L"BUTTON", L"Add monitor", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_MONITOR_ADD_BTN), g_hInst, nullptr);
-    g_monitorRemoveButton = CreateWindowW(L"BUTTON", L"Remove monitor", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_MONITOR_DEL_BTN), g_hInst, nullptr);
+    g_monitorAddButton = CreateWindowW(L"BUTTON", L"Добавить мониторинг", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_MONITOR_ADD_BTN), g_hInst, nullptr);
+    g_monitorRemoveButton = CreateWindowW(L"BUTTON", L"Убрать мониторинг", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_MONITOR_DEL_BTN), g_hInst, nullptr);
     g_scanResultsEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL, 0, 0, 0, 0, hWnd, reinterpret_cast<HMENU>(IDC_SCAN_RESULTS), g_hInst, nullptr);
 
     ApplyControlFont(g_statusLabel);
@@ -671,50 +675,65 @@ static void LayoutControls(HWND hWnd)
     RECT clientRect = {};
     GetClientRect(hWnd, &clientRect);
 
-    const int left = 24;
-    const int top = 24;
-    const int width = max(460, clientRect.right - 48);
-    const int editWidth = max(320, width - 190);
-    const int buttonLeft = left + editWidth + 12;
-    const int labelHeight = 24;
+    const int left = 22;
+    const int top = 20;
+    const int rightMargin = 22;
+    const int contentWidth = max(560, clientRect.right - left - rightMargin);
+    const int labelHeight = 22;
+    const int rowGap = 8;
+    const int sectionGap = 14;
     const int editHeight = 28;
     const int buttonHeight = 30;
-    const int gap = 12;
+    const int shortButtonWidth = 160;
+    const int mediumButtonWidth = 190;
+    const int actionButtonWidth = 170;
+    const int wideButtonWidth = 200;
+    const int editWidth = max(340, contentWidth - actionButtonWidth - 12);
+    const int buttonLeft = left + editWidth + 12;
 
-    MoveWindow(g_statusLabel, left, top, width, labelHeight, TRUE);
-    MoveWindow(g_userLabel, left, top + 36, width, labelHeight, TRUE);
-    MoveWindow(g_licenseLabel, left, top + 72, width, labelHeight, TRUE);
-    MoveWindow(g_avLabel, left, top + 108, width, labelHeight, TRUE);
-    MoveWindow(g_dbLabel, left, top + 144, width, labelHeight, TRUE);
+    int y = top;
+    MoveWindow(g_statusLabel, left, y, contentWidth, labelHeight, TRUE); y += labelHeight + rowGap;
+    MoveWindow(g_userLabel, left, y, contentWidth, labelHeight, TRUE); y += labelHeight + rowGap;
+    MoveWindow(g_licenseLabel, left, y, contentWidth, labelHeight, TRUE); y += labelHeight + rowGap;
+    MoveWindow(g_avLabel, left, y, contentWidth, labelHeight, TRUE); y += labelHeight + rowGap;
+    MoveWindow(g_dbLabel, left, y, contentWidth, labelHeight, TRUE); y += labelHeight + sectionGap;
 
-    MoveWindow(g_emailEdit, left, top + 190, 320, editHeight, TRUE);
-    MoveWindow(g_passwordEdit, left, top + 190 + editHeight + gap, 320, editHeight, TRUE);
-    MoveWindow(g_loginButton, left, top + 190 + (editHeight + gap) * 2, 160, buttonHeight, TRUE);
+    MoveWindow(g_emailEdit, left, y, 360, editHeight, TRUE); y += editHeight + rowGap;
+    MoveWindow(g_passwordEdit, left, y, 360, editHeight, TRUE); y += editHeight + rowGap;
+    MoveWindow(g_loginButton, left, y, shortButtonWidth, buttonHeight, TRUE);
+    MoveWindow(g_logoutButton, left + shortButtonWidth + 12, y, mediumButtonWidth, buttonHeight, TRUE);
+    y += buttonHeight + sectionGap;
 
-    MoveWindow(g_activateEdit, left, top + 318, 320, editHeight, TRUE);
-    MoveWindow(g_activateButton, left, top + 318 + editHeight + gap, 160, buttonHeight, TRUE);
+    MoveWindow(g_activateEdit, left, y, 360, editHeight, TRUE);
+    MoveWindow(g_activateButton, left + 372, y - 1, shortButtonWidth, buttonHeight, TRUE);
+    y += editHeight + sectionGap;
 
-    MoveWindow(g_logoutButton, left, top + 318 + (editHeight + gap) * 2, 190, buttonHeight, TRUE);
+    MoveWindow(g_scanFileEdit, left, y, editWidth, editHeight, TRUE);
+    MoveWindow(g_scanFileButton, buttonLeft, y - 1, actionButtonWidth, buttonHeight, TRUE);
+    y += editHeight + rowGap;
 
-    MoveWindow(g_scanFileEdit, left, top + 430, editWidth, editHeight, TRUE);
-    MoveWindow(g_scanFileButton, buttonLeft, top + 430, 170, buttonHeight, TRUE);
+    MoveWindow(g_scanDirEdit, left, y, editWidth, editHeight, TRUE);
+    MoveWindow(g_scanDirButton, buttonLeft, y - 1, actionButtonWidth, buttonHeight, TRUE);
+    y += editHeight + rowGap;
 
-    MoveWindow(g_scanDirEdit, left, top + 430 + editHeight + gap, editWidth, editHeight, TRUE);
-    MoveWindow(g_scanDirButton, buttonLeft, top + 430 + editHeight + gap, 170, buttonHeight, TRUE);
+    MoveWindow(g_scanFixedButton, left, y, 220, buttonHeight, TRUE);
+    y += buttonHeight + sectionGap;
 
-    MoveWindow(g_scanFixedButton, left, top + 430 + (editHeight + gap) * 2, 220, buttonHeight, TRUE);
+    const int bottomSectionHeight = 116;
+    const int resultsHeight = max(200, clientRect.bottom - y - bottomSectionHeight - 24);
+    MoveWindow(g_scanResultsEdit, left, y, contentWidth, resultsHeight, TRUE);
+    y += resultsHeight + sectionGap;
 
-    MoveWindow(g_scheduleLabel, left, top + 430 + (editHeight + gap) * 2 + 46, width, labelHeight, TRUE);
-    MoveWindow(g_scheduleEdit, left, top + 430 + (editHeight + gap) * 2 + 78, 120, editHeight, TRUE);
-    MoveWindow(g_scheduleEnableButton, left + 140, top + 430 + (editHeight + gap) * 2 + 76, 170, buttonHeight, TRUE);
-    MoveWindow(g_scheduleDisableButton, left + 320, top + 430 + (editHeight + gap) * 2 + 76, 170, buttonHeight, TRUE);
+    MoveWindow(g_scheduleLabel, left, y, contentWidth, labelHeight, TRUE); y += labelHeight + 6;
+    MoveWindow(g_scheduleEdit, left, y, 90, editHeight, TRUE);
+    MoveWindow(g_scheduleEnableButton, left + 102, y - 1, wideButtonWidth, buttonHeight, TRUE);
+    MoveWindow(g_scheduleDisableButton, left + 314, y - 1, wideButtonWidth, buttonHeight, TRUE);
+    y += buttonHeight + sectionGap;
 
-    MoveWindow(g_monitorLabel, left, top + 430 + (editHeight + gap) * 2 + 120, width, labelHeight, TRUE);
-    MoveWindow(g_monitorEdit, left, top + 430 + (editHeight + gap) * 2 + 152, editWidth, editHeight, TRUE);
-    MoveWindow(g_monitorAddButton, buttonLeft, top + 430 + (editHeight + gap) * 2 + 150, 170, buttonHeight, TRUE);
-    MoveWindow(g_monitorRemoveButton, buttonLeft, top + 430 + (editHeight + gap) * 2 + 150 + buttonHeight + gap, 170, buttonHeight, TRUE);
-
-    MoveWindow(g_scanResultsEdit, left, top + 430 + (editHeight + gap) * 2 + 204, width, max(120, clientRect.bottom - (top + 430 + (editHeight + gap) * 2 + 204) - 24), TRUE);
+    MoveWindow(g_monitorLabel, left, y, contentWidth, labelHeight, TRUE); y += labelHeight + 6;
+    MoveWindow(g_monitorEdit, left, y, editWidth, editHeight, TRUE);
+    MoveWindow(g_monitorAddButton, buttonLeft, y - 1, actionButtonWidth, buttonHeight, TRUE);
+    MoveWindow(g_monitorRemoveButton, buttonLeft, y - 1 + buttonHeight + rowGap, actionButtonWidth, buttonHeight, TRUE);
 }
 
 static std::wstring GetControlText(HWND control)
@@ -814,9 +833,9 @@ static void UpdateUiFromState()
 
     std::wstring scheduleText = L"Расписание: ";
     if (g_scheduledScanState.enabled) {
-        scheduleText += L"enabled, every ";
+        scheduleText += L"включено, каждые ";
         scheduleText += std::to_wstring(g_scheduledScanState.intervalMinutes);
-        scheduleText += L" min";
+        scheduleText += L" мин";
         if (g_scheduledScanState.nextRunText[0] != 0) {
             scheduleText += L", следующий запуск ";
             scheduleText += g_scheduledScanState.nextRunText;
@@ -1127,6 +1146,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_SIZE:
         LayoutControls(hWnd);
         break;
+
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* minMaxInfo = reinterpret_cast<MINMAXINFO*>(lParam);
+        if (minMaxInfo) {
+            minMaxInfo->ptMinTrackSize.x = kMinimumWindowWidth;
+            minMaxInfo->ptMinTrackSize.y = kMinimumWindowHeight;
+        }
+        return 0;
+    }
 
     case WM_APP_INITIALIZE:
         WriteDebugLog(L"WM_APP_INITIALIZE received");

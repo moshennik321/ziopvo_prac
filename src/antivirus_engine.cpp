@@ -7,6 +7,7 @@
 #include <wincrypt.h>
 
 #include <algorithm>
+#include <array>
 #include <ctime>
 #include <fstream>
 #include <sstream>
@@ -15,8 +16,6 @@
 #pragma comment(lib, "crypt32.lib")
 
 namespace {
-constexpr uint64_t kFnvOffsetBasis = 14695981039346656037ULL;
-constexpr uint64_t kFnvPrime = 1099511628211ULL;
 constexpr wchar_t kPowerShellExtension[] = L".ps1";
 constexpr char kSigningCertificatePem[] =
     "-----BEGIN CERTIFICATE-----\n"
@@ -40,15 +39,40 @@ constexpr char kSigningCertificatePem[] =
     "AiiRiZH+AFcXeIzfoMGVlFHB+HDMhH4IU1ZuvWLiY0du2UbZWDOFk/zxMLHUDsTq\n"
     "I7SMLW3GVw==\n"
     "-----END CERTIFICATE-----\n";
+constexpr char kDefaultDataBase64[] =
+    "REItS0xJTU9WAAEAAAACAAAAD1Rlc3QuUEUuVHJhZmZpYwAAAAhNWpAAAwAAAAAAACBa+PSx0WN0ZsxjJMAqxT4sO1jUxpdMal7m0U+AWlUxVQAAAAAAAAAIAAAAAlBFAAAAAAAAAAAAAAAAAAAAAAAAABBUZXN0LlBTLk1pbWlrYXR6AAAACEludm9rZS1NAAAAIOy+sDT0yil0mbTqvFwtQ3we27NmoUSUOqdIgia4WeqwAAAAAAAAAAcAAAAKUE9XRVJTSEVMTAAAAAAAAAAAAAAAAAAAEAA=";
+constexpr char kDefaultManifestBase64[] =
+    "TUYtS0xJTU9WAAEBAAABjrQjXAD//////////wAAAAL10B8Ap+bSehh+7WaZ9Dw07mYzTmZhbENEHpRJD7sKihEREREREREREREREREREREBAAABjrQjXAAAAAAAAAAAAAAAAGEAAAEAUqGmf7RsbIZ8y9Loo/J6azL9AK7b7IVRCcUcyJHB4Wt2DbRS0+0CUVCSVKYPjuwf+kC30f7i0MlSIL4PbXdDifYPpJdBl3YUgmdvtzKQdysTp+kERRRi9C6MVBuL3LcgTvPWiCjvUZ0kcfiQFPDhoG6HHZrG+ZkJm531FIG8B7DXIfc2ccTbx4NbNHIE/TLqGKffhHO+sfYcpdJO6pLZ+a94LaYDqUecXYEmlPdun/thcYMsvK4npPJvrXUlU6x4LugVEbfyXm19EKMgC3j/kuyWijJqAqQXA2sv8t/7j5sbSofce9vQOvy6XXHVcoP/euUjz68dVr7sabvdcQff8CIiIiIiIiIiIiIiIiIiIiIBAAABjrQjXAAAAAAAAAAAYQAAAGoAAAEAH+Y+49wdcg8YCdUDFZ1RKZlveYZnUu2Y0SZtR2bbtmO3+bksemz7aYZ2lUeoPHziAQAzo/pPjCBtZnwv0do5Z0cUjN5QHH4KkEPb9OvOgFxsTLJDiQWL21bUynlglQaeppGuo7IqIs/ZWgTDqqrJVmzdcRUN8pjgu3ym0xe2w8WRdgnshQwlZPSlwlLd4rycSvOEjbk7WlVUs3Gs03wclrpLYQBocTqghoLKxzpjyXzAKJ7veA1OBAFuRmYszCe93Vu8vPkuf5HVNjxQ7g5dlikfwrvHlvPrbaDyWEkJME2OT2Uydw9X2LYA/6+BA0vSnIj+GLKbyAQ+obkEsxtqUwAAAQBiHEouQ4HPx74/ox4emI75K+cfUZYpnPdylE3Efbep2osFxlLZq2KV0cDh/uxgMwccYZ38JxKroCDAg2t4QmZiqd19Ea+RMWYqquYA9YBVI5fK14nNWJ5EgJl++caOoOEvHp8wAYXYvatdLPTdtMxoyldeRQbwm7W0y2qmGV1qmNTzFcaE2ZzzBkOWWdf6uIKSsG9fUJDlMOV5L79jdMQah+fX04ntiwGHQ1lhItlBZBPEX1Tk91ZiApLrdFP/5i0UBlyKwu+Vfs3caGx0s7nKHGq4M/EqOOsxzxCtP2/2OqMCdip28k6o76Gl8Ibm7aqzkrjM8bpybpUMujvMXqFs";
 
-uint64_t ComputeFnv1a64(const unsigned char* data, size_t size)
+constexpr char kDataMagic[] = "DB-KLIMOV";
+constexpr char kManifestMagic[] = "MF-KLIMOV";
+constexpr uint16_t kDataVersion = 1;
+constexpr uint16_t kManifestVersion = 1;
+
+struct ManifestEntry {
+    std::string id;
+    uint8_t statusCode = 0;
+    long long updatedAtEpochMillis = 0;
+    uint64_t dataOffset = 0;
+    uint32_t dataLength = 0;
+    std::vector<unsigned char> recordSignatureBytes;
+};
+
+struct ManifestInfo {
+    uint8_t exportType = 0;
+    long long generatedAtEpochMillis = 0;
+    long long sinceEpochMillis = 0;
+    std::array<unsigned char, 32> dataSha256 = {};
+    std::vector<ManifestEntry> entries;
+};
+
+uint64_t BytesToUInt64LittleEndian(const unsigned char* bytes)
 {
-    uint64_t hash = kFnvOffsetBasis;
-    for (size_t index = 0; index < size; ++index) {
-        hash ^= static_cast<uint64_t>(data[index]);
-        hash *= kFnvPrime;
+    uint64_t value = 0;
+    for (int index = 0; index < 8; ++index) {
+        value |= (static_cast<uint64_t>(bytes[index]) << (index * 8));
     }
-    return hash;
+    return value;
 }
 
 std::vector<unsigned char> ComputeSha256(const unsigned char* data, size_t size)
@@ -65,20 +89,8 @@ std::vector<unsigned char> ComputeSha256(const unsigned char* data, size_t size)
         return {};
     }
 
-    if (BCryptGetProperty(
-            algorithmHandle,
-            BCRYPT_OBJECT_LENGTH,
-            reinterpret_cast<PUCHAR>(&objectLength),
-            sizeof(objectLength),
-            &dataLength,
-            0) != 0 ||
-        BCryptGetProperty(
-            algorithmHandle,
-            BCRYPT_HASH_LENGTH,
-            reinterpret_cast<PUCHAR>(&hashLength),
-            sizeof(hashLength),
-            &dataLength,
-            0) != 0) {
+    if (BCryptGetProperty(algorithmHandle, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength), sizeof(objectLength), &dataLength, 0) != 0 ||
+        BCryptGetProperty(algorithmHandle, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hashLength), sizeof(hashLength), &dataLength, 0) != 0) {
         BCryptCloseAlgorithmProvider(algorithmHandle, 0);
         return {};
     }
@@ -86,14 +98,7 @@ std::vector<unsigned char> ComputeSha256(const unsigned char* data, size_t size)
     hashObject.resize(objectLength);
     hashBytes.resize(hashLength);
 
-    if (BCryptCreateHash(
-            algorithmHandle,
-            &hashHandle,
-            hashObject.data(),
-            static_cast<ULONG>(hashObject.size()),
-            nullptr,
-            0,
-            0) != 0 ||
+    if (BCryptCreateHash(algorithmHandle, &hashHandle, hashObject.data(), static_cast<ULONG>(hashObject.size()), nullptr, 0, 0) != 0 ||
         BCryptHashData(hashHandle, const_cast<PUCHAR>(data), static_cast<ULONG>(size), 0) != 0 ||
         BCryptFinishHash(hashHandle, hashBytes.data(), static_cast<ULONG>(hashBytes.size()), 0) != 0) {
         if (hashHandle) {
@@ -106,33 +111,6 @@ std::vector<unsigned char> ComputeSha256(const unsigned char* data, size_t size)
     BCryptDestroyHash(hashHandle);
     BCryptCloseAlgorithmProvider(algorithmHandle, 0);
     return hashBytes;
-}
-
-std::vector<unsigned char> UInt64ToBytes(uint64_t value)
-{
-    std::vector<unsigned char> bytes(8, 0);
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        bytes[index] = static_cast<unsigned char>((value >> (index * 8)) & 0xFFU);
-    }
-    return bytes;
-}
-
-std::vector<unsigned char> UInt32ToBytes(uint32_t value)
-{
-    std::vector<unsigned char> bytes(4, 0);
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        bytes[index] = static_cast<unsigned char>((value >> (index * 8)) & 0xFFU);
-    }
-    return bytes;
-}
-
-uint64_t BytesToUInt64LittleEndian(const unsigned char* bytes)
-{
-    uint64_t value = 0;
-    for (int index = 0; index < 8; ++index) {
-        value |= (static_cast<uint64_t>(bytes[index]) << (index * 8));
-    }
-    return value;
 }
 
 std::wstring FormatLocalDateTime(long long unixSeconds)
@@ -183,6 +161,131 @@ AvObjectType DetectObjectType(const std::wstring& path, std::istream& stream)
     return AvObjectType::Unknown;
 }
 
+std::string WideToUtf8(const std::wstring& value)
+{
+    if (value.empty()) {
+        return {};
+    }
+
+    const int size = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), result.data(), size, nullptr, nullptr);
+    return result;
+}
+
+std::wstring NarrowToWide(const std::string& value)
+{
+    if (value.empty()) {
+        return L"";
+    }
+
+    const int size = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), nullptr, 0);
+    std::wstring result(size, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), static_cast<int>(value.size()), result.data(), size);
+    return result;
+}
+
+std::wstring BytesToHex(const std::vector<unsigned char>& bytes)
+{
+    static const wchar_t* alphabet = L"0123456789abcdef";
+    std::wstring output;
+    output.reserve(bytes.size() * 2);
+    for (unsigned char value : bytes) {
+        output.push_back(alphabet[(value >> 4) & 0x0F]);
+        output.push_back(alphabet[value & 0x0F]);
+    }
+    return output;
+}
+
+std::wstring JsonEscape(const std::wstring& value)
+{
+    std::wstring escaped;
+    escaped.reserve(value.size());
+    for (wchar_t ch : value) {
+        switch (ch) {
+        case L'\\':
+            escaped += L"\\\\";
+            break;
+        case L'"':
+            escaped += L"\\\"";
+            break;
+        case L'\b':
+            escaped += L"\\b";
+            break;
+        case L'\f':
+            escaped += L"\\f";
+            break;
+        case L'\n':
+            escaped += L"\\n";
+            break;
+        case L'\r':
+            escaped += L"\\r";
+            break;
+        case L'\t':
+            escaped += L"\\t";
+            break;
+        default:
+            if (ch <= 0x1F) {
+                wchar_t buffer[7] = {};
+                swprintf_s(buffer, L"\\u%04x", static_cast<unsigned int>(ch));
+                escaped += buffer;
+            } else {
+                escaped += ch;
+            }
+            break;
+        }
+    }
+    return escaped;
+}
+
+std::wstring StatusCodeToName(uint8_t statusCode)
+{
+    return statusCode == 2 ? L"DELETED" : L"ACTUAL";
+}
+
+std::wstring ObjectTypeToBackendName(AvObjectType objectType)
+{
+    switch (objectType) {
+    case AvObjectType::Pe:
+        return L"PE";
+    case AvObjectType::PowerShell:
+        return L"POWERSHELL";
+    default:
+        return L"UNKNOWN";
+    }
+}
+
+AvObjectType BackendNameToObjectType(const std::wstring& fileType)
+{
+    const std::wstring normalized = ToLowerString(fileType);
+    if (normalized == L"pe") {
+        return AvObjectType::Pe;
+    }
+    if (normalized == L"powershell" || normalized == L"ps1") {
+        return AvObjectType::PowerShell;
+    }
+    return AvObjectType::Unknown;
+}
+
+std::wstring BuildCanonicalRecordJson(const AvRecord& record)
+{
+    const std::wstring firstBytesHex = BytesToHex(record.firstBytes);
+    const std::wstring remainderHashHex = BytesToHex(record.remainderHash);
+    const std::wstring fileType = ObjectTypeToBackendName(record.objectType);
+    const std::wstring status = StatusCodeToName(record.statusCode);
+    const long long remainderLength = static_cast<long long>(record.objectSignatureLength) - static_cast<long long>(record.firstBytes.size());
+
+    return
+        L"{\"fileType\":\"" + JsonEscape(fileType) +
+        L"\",\"firstBytesHex\":\"" + JsonEscape(firstBytesHex) +
+        L"\",\"offsetEnd\":" + std::to_wstring(record.offsetEnd) +
+        L",\"offsetStart\":" + std::to_wstring(record.offsetBegin) +
+        L",\"remainderHashHex\":\"" + JsonEscape(remainderHashHex) +
+        L"\",\"remainderLength\":" + std::to_wstring(remainderLength) +
+        L",\"status\":\"" + JsonEscape(status) +
+        L"\",\"threatName\":\"" + JsonEscape(record.name) + L"\"}";
+}
+
 std::vector<unsigned char> DecodeBase64OrPem(const std::string& encoded)
 {
     DWORD requiredSize = 0;
@@ -212,74 +315,10 @@ std::vector<unsigned char> DecodeBase64OrPem(const std::string& encoded)
     return decoded;
 }
 
-std::vector<unsigned char> BuildSignableRecordBytes(const AvRecord& record)
-{
-    std::vector<unsigned char> bytes;
-    const auto appendBytes = [&bytes](const std::vector<unsigned char>& part) {
-        bytes.insert(bytes.end(), part.begin(), part.end());
-    };
-
-    appendBytes(UInt64ToBytes(record.objectSignaturePrefix));
-    appendBytes(UInt32ToBytes(record.objectSignatureLength));
-    appendBytes(record.objectSignature);
-    appendBytes(UInt64ToBytes(record.offsetBegin));
-    appendBytes(UInt64ToBytes(record.offsetEnd));
-    appendBytes(UInt32ToBytes(static_cast<uint32_t>(record.objectType)));
-    return bytes;
-}
-
-std::vector<unsigned char> BuildRecordSignature(
-    uint64_t prefix,
-    uint32_t length,
-    const std::vector<unsigned char>& objectSignature,
-    uint64_t offsetBegin,
-    uint64_t offsetEnd,
-    AvObjectType objectType)
-{
-    std::vector<unsigned char> serialized;
-    const auto appendUInt64 = [&serialized](uint64_t value) {
-        const std::vector<unsigned char> bytes = UInt64ToBytes(value);
-        serialized.insert(serialized.end(), bytes.begin(), bytes.end());
-    };
-    const auto appendUInt32 = [&serialized](uint32_t value) {
-        for (int index = 0; index < 4; ++index) {
-            serialized.push_back(static_cast<unsigned char>((value >> (index * 8)) & 0xFFU));
-        }
-    };
-
-    appendUInt64(prefix);
-    appendUInt32(length);
-    serialized.insert(serialized.end(), objectSignature.begin(), objectSignature.end());
-    appendUInt64(offsetBegin);
-    appendUInt64(offsetEnd);
-    appendUInt32(static_cast<uint32_t>(objectType));
-
-    const uint64_t signatureHash = ComputeFnv1a64(serialized.data(), serialized.size());
-    return UInt64ToBytes(signatureHash);
-}
-
-AvRecord BuildRecord(
-    const std::vector<unsigned char>& signatureBytes,
-    uint64_t offsetBegin,
-    uint64_t offsetEnd,
-    AvObjectType objectType,
-    const std::wstring& name)
-{
-    AvRecord record = {};
-    record.objectSignatureLength = static_cast<uint32_t>(signatureBytes.size());
-    record.objectSignaturePrefix = BytesToUInt64LittleEndian(signatureBytes.data());
-    record.objectSignature = UInt64ToBytes(ComputeFnv1a64(signatureBytes.data(), signatureBytes.size()));
-    record.offsetBegin = offsetBegin;
-    record.offsetEnd = offsetEnd;
-    record.objectType = objectType;
-    record.name = name;
-    return record;
-}
-
-bool VerifyRecordSignature(const AvRecord& record)
+bool VerifyRsaSignature(const std::vector<unsigned char>& payload, const std::vector<unsigned char>& signatureBytes)
 {
     const std::vector<unsigned char> certificateBytes = DecodeBase64OrPem(kSigningCertificatePem);
-    if (certificateBytes.empty() || record.avRecordSignature.empty()) {
+    if (certificateBytes.empty() || signatureBytes.empty()) {
         return false;
     }
 
@@ -302,8 +341,7 @@ bool VerifyRecordSignature(const AvRecord& record)
         return false;
     }
 
-    const std::vector<unsigned char> signableBytes = BuildSignableRecordBytes(record);
-    const std::vector<unsigned char> hashBytes = ComputeSha256(signableBytes.data(), signableBytes.size());
+    const std::vector<unsigned char> hashBytes = ComputeSha256(payload.data(), payload.size());
     if (hashBytes.empty()) {
         BCryptDestroyKey(keyHandle);
         CertFreeCertificateContext(certContext);
@@ -318,13 +356,387 @@ bool VerifyRecordSignature(const AvRecord& record)
         &paddingInfo,
         const_cast<PUCHAR>(hashBytes.data()),
         static_cast<ULONG>(hashBytes.size()),
-        const_cast<PUCHAR>(record.avRecordSignature.data()),
-        static_cast<ULONG>(record.avRecordSignature.size()),
+        const_cast<PUCHAR>(signatureBytes.data()),
+        static_cast<ULONG>(signatureBytes.size()),
         BCRYPT_PAD_PKCS1);
 
     BCryptDestroyKey(keyHandle);
     CertFreeCertificateContext(certContext);
     return verifyStatus == 0;
+}
+
+struct BigEndianReader {
+    const std::vector<unsigned char>& bytes;
+    size_t offset = 0;
+
+    bool ReadUInt8(uint8_t* value)
+    {
+        if (offset + 1 > bytes.size()) {
+            return false;
+        }
+        *value = bytes[offset++];
+        return true;
+    }
+
+    bool ReadUInt16(uint16_t* value)
+    {
+        if (offset + 2 > bytes.size()) {
+            return false;
+        }
+        *value = (static_cast<uint16_t>(bytes[offset]) << 8) |
+            static_cast<uint16_t>(bytes[offset + 1]);
+        offset += 2;
+        return true;
+    }
+
+    bool ReadUInt32(uint32_t* value)
+    {
+        if (offset + 4 > bytes.size()) {
+            return false;
+        }
+        *value =
+            (static_cast<uint32_t>(bytes[offset]) << 24) |
+            (static_cast<uint32_t>(bytes[offset + 1]) << 16) |
+            (static_cast<uint32_t>(bytes[offset + 2]) << 8) |
+            static_cast<uint32_t>(bytes[offset + 3]);
+        offset += 4;
+        return true;
+    }
+
+    bool ReadUInt64(uint64_t* value)
+    {
+        if (offset + 8 > bytes.size()) {
+            return false;
+        }
+        *value = 0;
+        for (int index = 0; index < 8; ++index) {
+            *value = (*value << 8) | bytes[offset + index];
+        }
+        offset += 8;
+        return true;
+    }
+
+    bool ReadInt64(long long* value)
+    {
+        uint64_t unsignedValue = 0;
+        if (!ReadUInt64(&unsignedValue)) {
+            return false;
+        }
+        *value = static_cast<long long>(unsignedValue);
+        return true;
+    }
+
+    bool ReadBytes(size_t count, std::vector<unsigned char>* value)
+    {
+        if (offset + count > bytes.size()) {
+            return false;
+        }
+        value->assign(bytes.begin() + static_cast<long long>(offset), bytes.begin() + static_cast<long long>(offset + count));
+        offset += count;
+        return true;
+    }
+
+    bool ReadLengthPrefixedBytes(std::vector<unsigned char>* value)
+    {
+        uint32_t length = 0;
+        if (!ReadUInt32(&length)) {
+            return false;
+        }
+        return ReadBytes(length, value);
+    }
+
+    bool ReadUtf8(std::wstring* value)
+    {
+        std::vector<unsigned char> bytesValue;
+        if (!ReadLengthPrefixedBytes(&bytesValue)) {
+            return false;
+        }
+        *value = NarrowToWide(std::string(bytesValue.begin(), bytesValue.end()));
+        return true;
+    }
+};
+
+std::string UuidToString(uint64_t msb, uint64_t lsb)
+{
+    std::ostringstream stream;
+    stream.setf(std::ios::hex, std::ios::basefield);
+    stream.fill('0');
+    stream.width(8);
+    stream << static_cast<uint32_t>(msb >> 32);
+    stream << '-';
+    stream.width(4);
+    stream << static_cast<uint16_t>((msb >> 16) & 0xFFFF);
+    stream << '-';
+    stream.width(4);
+    stream << static_cast<uint16_t>(msb & 0xFFFF);
+    stream << '-';
+    stream.width(4);
+    stream << static_cast<uint16_t>(lsb >> 48);
+    stream << '-';
+    stream.width(12);
+    stream << (lsb & 0x0000FFFFFFFFFFFFULL);
+    return stream.str();
+}
+
+bool ParseManifestBytes(
+    const std::vector<unsigned char>& manifestBytes,
+    ManifestInfo* manifestInfo,
+    std::vector<unsigned char>* unsignedManifestBytes,
+    std::vector<unsigned char>* manifestSignature,
+    std::wstring* errorMessage)
+{
+    BigEndianReader reader{ manifestBytes };
+    std::vector<unsigned char> magicBytes;
+    if (!reader.ReadBytes(strlen(kManifestMagic), &magicBytes) ||
+        std::string(magicBytes.begin(), magicBytes.end()) != kManifestMagic) {
+        if (errorMessage) {
+            *errorMessage = L"Неверный формат манифеста";
+        }
+        return false;
+    }
+
+    uint16_t version = 0;
+    uint8_t exportType = 0;
+    long long generatedAt = 0;
+    long long sinceEpoch = 0;
+    uint32_t entryCount = 0;
+    std::vector<unsigned char> shaBytes;
+
+    if (!reader.ReadUInt16(&version) ||
+        version != kManifestVersion ||
+        !reader.ReadUInt8(&exportType) ||
+        !reader.ReadInt64(&generatedAt) ||
+        !reader.ReadInt64(&sinceEpoch) ||
+        !reader.ReadUInt32(&entryCount) ||
+        !reader.ReadBytes(32, &shaBytes)) {
+        if (errorMessage) {
+            *errorMessage = L"Манифест поврежден";
+        }
+        return false;
+    }
+
+    manifestInfo->exportType = exportType;
+    manifestInfo->generatedAtEpochMillis = generatedAt;
+    manifestInfo->sinceEpochMillis = sinceEpoch;
+    std::copy(shaBytes.begin(), shaBytes.end(), manifestInfo->dataSha256.begin());
+    manifestInfo->entries.clear();
+
+    for (uint32_t index = 0; index < entryCount; ++index) {
+        uint64_t msb = 0;
+        uint64_t lsb = 0;
+        ManifestEntry entry;
+        if (!reader.ReadUInt64(&msb) ||
+            !reader.ReadUInt64(&lsb) ||
+            !reader.ReadUInt8(&entry.statusCode) ||
+            !reader.ReadInt64(&entry.updatedAtEpochMillis) ||
+            !reader.ReadUInt64(&entry.dataOffset) ||
+            !reader.ReadUInt32(&entry.dataLength) ||
+            !reader.ReadLengthPrefixedBytes(&entry.recordSignatureBytes)) {
+            if (errorMessage) {
+                *errorMessage = L"Манифест содержит неполную запись";
+            }
+            return false;
+        }
+        entry.id = UuidToString(msb, lsb);
+        manifestInfo->entries.push_back(entry);
+    }
+
+    const size_t unsignedLength = reader.offset;
+    if (!reader.ReadLengthPrefixedBytes(manifestSignature) || reader.offset != manifestBytes.size()) {
+        if (errorMessage) {
+            *errorMessage = L"Подпись манифеста отсутствует";
+        }
+        return false;
+    }
+
+    unsignedManifestBytes->assign(manifestBytes.begin(), manifestBytes.begin() + static_cast<long long>(unsignedLength));
+    return true;
+}
+
+bool ParseDataRecord(
+    const std::vector<unsigned char>& bytes,
+    const ManifestEntry& manifestEntry,
+    AvRecord* record,
+    std::wstring* errorMessage)
+{
+    BigEndianReader reader{ bytes };
+    std::wstring threatName;
+    std::wstring fileType;
+    std::vector<unsigned char> firstBytes;
+    std::vector<unsigned char> remainderHash;
+    long long remainderLength = 0;
+    long long offsetStart = 0;
+    long long offsetEnd = 0;
+
+    if (!reader.ReadUtf8(&threatName) ||
+        !reader.ReadLengthPrefixedBytes(&firstBytes) ||
+        !reader.ReadLengthPrefixedBytes(&remainderHash) ||
+        !reader.ReadInt64(&remainderLength) ||
+        !reader.ReadUtf8(&fileType) ||
+        !reader.ReadInt64(&offsetStart) ||
+        !reader.ReadInt64(&offsetEnd) ||
+        reader.offset != bytes.size()) {
+        if (errorMessage) {
+            *errorMessage = L"Повреждена запись базы";
+        }
+        return false;
+    }
+
+    if (firstBytes.size() != 8 || remainderLength < 0 || offsetEnd < offsetStart) {
+        if (errorMessage) {
+            *errorMessage = L"Запись базы содержит некорректные поля";
+        }
+        return false;
+    }
+
+    record->recordId = manifestEntry.id;
+    record->statusCode = manifestEntry.statusCode;
+    record->updatedAtEpochMillis = manifestEntry.updatedAtEpochMillis;
+    record->firstBytes = firstBytes;
+    record->remainderHash = remainderHash;
+    record->objectSignaturePrefix = BytesToUInt64LittleEndian(firstBytes.data());
+    record->objectSignatureLength = static_cast<uint32_t>(firstBytes.size() + remainderLength);
+    record->objectSignature = remainderHash;
+    record->offsetBegin = static_cast<uint64_t>(offsetStart);
+    record->offsetEnd = static_cast<uint64_t>(offsetEnd);
+    record->objectType = BackendNameToObjectType(fileType);
+    record->avRecordSignature = manifestEntry.recordSignatureBytes;
+    record->name = threatName;
+    return true;
+}
+
+bool VerifyRecordSignature(const AvRecord& record)
+{
+    const std::wstring canonicalJson = BuildCanonicalRecordJson(record);
+    const std::string canonicalUtf8 = WideToUtf8(canonicalJson);
+    const std::vector<unsigned char> payload(canonicalUtf8.begin(), canonicalUtf8.end());
+    return VerifyRsaSignature(payload, record.avRecordSignature);
+}
+
+bool ReadFileBytes(const std::wstring& path, std::vector<unsigned char>* bytes)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream.is_open()) {
+        return false;
+    }
+    stream.seekg(0, std::ios::end);
+    const std::streamoff length = stream.tellg();
+    if (length < 0) {
+        return false;
+    }
+    stream.seekg(0, std::ios::beg);
+    bytes->resize(static_cast<size_t>(length));
+    if (!bytes->empty()) {
+        stream.read(reinterpret_cast<char*>(bytes->data()), length);
+    }
+    return stream.good() || stream.eof();
+}
+
+bool WriteFileBytes(const std::wstring& path, const std::vector<unsigned char>& bytes)
+{
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream.is_open()) {
+        return false;
+    }
+    if (!bytes.empty()) {
+        stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    return stream.good();
+}
+
+AvDatabaseLoadResult LoadAntivirusDatabaseFromBytes(
+    const std::vector<unsigned char>& manifestBytes,
+    const std::vector<unsigned char>& dataBytes,
+    AvDatabase* database)
+{
+    AvDatabaseLoadResult result = {};
+    if (!database) {
+        result.status = AvDatabaseLoadStatus::IoError;
+        result.message = L"Не задан объект базы";
+        return result;
+    }
+
+    ClearAntivirusDatabase(database);
+
+    ManifestInfo manifestInfo;
+    std::vector<unsigned char> unsignedManifest;
+    std::vector<unsigned char> manifestSignature;
+    if (!ParseManifestBytes(manifestBytes, &manifestInfo, &unsignedManifest, &manifestSignature, &result.message)) {
+        result.status = AvDatabaseLoadStatus::InvalidManifestFormat;
+        return result;
+    }
+
+    if (!VerifyRsaSignature(unsignedManifest, manifestSignature)) {
+        result.status = AvDatabaseLoadStatus::InvalidManifestSignature;
+        result.message = L"ЭЦП манифеста недействительна";
+        return result;
+    }
+
+    const std::vector<unsigned char> dataSha256 = ComputeSha256(dataBytes.data(), dataBytes.size());
+    if (dataSha256.size() != manifestInfo.dataSha256.size() ||
+        !std::equal(dataSha256.begin(), dataSha256.end(), manifestInfo.dataSha256.begin())) {
+        result.status = AvDatabaseLoadStatus::InvalidDataHash;
+        result.message = L"Контрольная сумма data.bin не совпадает";
+        return result;
+    }
+
+    BigEndianReader dataReader{ dataBytes };
+    std::vector<unsigned char> dataMagic;
+    uint16_t dataVersion = 0;
+    uint32_t recordCount = 0;
+    if (!dataReader.ReadBytes(strlen(kDataMagic), &dataMagic) ||
+        std::string(dataMagic.begin(), dataMagic.end()) != kDataMagic ||
+        !dataReader.ReadUInt16(&dataVersion) ||
+        dataVersion != kDataVersion ||
+        !dataReader.ReadUInt32(&recordCount)) {
+        result.status = AvDatabaseLoadStatus::InvalidDataFormat;
+        result.message = L"Формат data.bin поврежден";
+        return result;
+    }
+
+    const size_t recordsBaseOffset = dataReader.offset;
+    for (const ManifestEntry& entry : manifestInfo.entries) {
+        const size_t start = recordsBaseOffset + static_cast<size_t>(entry.dataOffset);
+        const size_t end = start + static_cast<size_t>(entry.dataLength);
+        if (end > dataBytes.size() || start > end) {
+            result.status = AvDatabaseLoadStatus::InvalidDataFormat;
+            result.message = L"Манифест содержит некорректное смещение записи";
+            return result;
+        }
+
+        std::vector<unsigned char> rawRecord(dataBytes.begin() + static_cast<long long>(start), dataBytes.begin() + static_cast<long long>(end));
+        AvRecord record = {};
+        std::wstring recordError;
+        if (!ParseDataRecord(rawRecord, entry, &record, &recordError)) {
+            ++result.skippedRecordCount;
+            result.invalidRecordIds.push_back(entry.id);
+            continue;
+        }
+
+        if (!VerifyRecordSignature(record)) {
+            ++result.skippedRecordCount;
+            result.invalidRecordIds.push_back(entry.id);
+            continue;
+        }
+
+        if (record.statusCode != 1 || record.objectType == AvObjectType::Unknown) {
+            ++result.skippedRecordCount;
+            continue;
+        }
+
+        database->recordsByPrefix[record.objectSignaturePrefix].push_back(record);
+        ++result.loadedRecordCount;
+    }
+
+    database->loaded = true;
+    database->releaseUnixSeconds = manifestInfo.generatedAtEpochMillis / 1000LL;
+    database->releaseDateText = FormatLocalDateTime(database->releaseUnixSeconds);
+    database->totalRecordCount = result.loadedRecordCount;
+    result.status = AvDatabaseLoadStatus::Ok;
+    if (result.loadedRecordCount == 0) {
+        result.message = L"Не загружено ни одной корректной записи";
+    }
+    return result;
 }
 
 ScanOutcome ScanByteStream(std::istream& stream, const std::wstring& path, const AvDatabase& database)
@@ -378,24 +790,21 @@ ScanOutcome ScanByteStream(std::istream& stream, const std::wstring& path, const
             if (offset < record.offsetBegin || offset > record.offsetEnd) {
                 continue;
             }
-            if (record.objectSignatureLength < 8) {
+            if (record.firstBytes.size() != 8 || record.objectSignatureLength < 8) {
                 continue;
             }
 
-            const uint32_t extraByteCount = record.objectSignatureLength - 8;
-            std::vector<unsigned char> signatureBytes = prefixBytes;
+            const uint32_t extraByteCount = record.objectSignatureLength - static_cast<uint32_t>(record.firstBytes.size());
+            std::vector<unsigned char> extraBytes(extraByteCount, 0);
             if (extraByteCount > 0) {
-                std::vector<unsigned char> extraBytes(extraByteCount, 0);
                 stream.read(reinterpret_cast<char*>(extraBytes.data()), extraByteCount);
                 if (static_cast<uint32_t>(stream.gcount()) != extraByteCount) {
                     continue;
                 }
-                signatureBytes.insert(signatureBytes.end(), extraBytes.begin(), extraBytes.end());
             }
 
-            const std::vector<unsigned char> computedSignature = UInt64ToBytes(
-                ComputeFnv1a64(signatureBytes.data(), signatureBytes.size()));
-            if (computedSignature != record.objectSignature) {
+            const std::vector<unsigned char> computedHash = ComputeSha256(extraBytes.data(), extraBytes.size());
+            if (computedHash != record.objectSignature) {
                 continue;
             }
 
@@ -448,40 +857,54 @@ void LoadEmbeddedAntivirusDatabase(AvDatabase* database)
         return;
     }
 
-    ClearAntivirusDatabase(database);
+    const std::vector<unsigned char> manifestBytes = DecodeBase64OrPem(kDefaultManifestBase64);
+    const std::vector<unsigned char> dataBytes = DecodeBase64OrPem(kDefaultDataBase64);
+    const AvDatabaseLoadResult result = LoadAntivirusDatabaseFromBytes(manifestBytes, dataBytes, database);
+    if (result.status != AvDatabaseLoadStatus::Ok) {
+        ClearAntivirusDatabase(database);
+    }
+}
 
-    const std::vector<unsigned char> peSignature = {
-        'M', 'Z', 0x90, 0x00, 0x03, 0x00, 0x00, 0x00,
-        'T', 'R', 'A', 'Y', 'P', 'E', '!', '!'
-    };
-    const std::vector<unsigned char> powerShellSignature = {
-        'I', 'n', 'v', 'o', 'k', 'e', '-', 'M',
-        'i', 'm', 'i', 'k', 'a', 't', 'z'
-    };
-
-    AvRecord peRecord = BuildRecord(peSignature, 0, 0, AvObjectType::Pe, L"Test.PE.Traffic");
-    peRecord.avRecordSignature = DecodeBase64OrPem(
-        "UxvNvzphQmEQUZLD0159dRgOUobnyxpPhqGccbSv+TLLilzcC6SDQ/wkEAQhs+ZFZDRBPZG6/CLOLZMLfgz2gJ8cQz0+HQEHI73RlfzSvZ/SqZcTZoJS1k+vzFZnGAnsS7A36eaisTZj+aK/567gKIlioarjRV9odTJmHp6qRfcYCF1AX72dkhN6dv7W/SSMQreDjmtF7EYBVTufPNot+K9ricCqc9X/GismCEhp7p8gy5Xi7Ndv2UjVFvwNOaJaL3nSvCyj88icRfma4GiartVzcjKhBjg4Ek/J7ho9y1JlU7ts6MqMJ4estz0CP6nAFe3Ag00ENYp4WR5Jpw9pag==");
-
-    AvRecord powerShellRecord = BuildRecord(powerShellSignature, 0, 4096, AvObjectType::PowerShell, L"Test.PS.Mimikatz");
-    powerShellRecord.avRecordSignature = DecodeBase64OrPem(
-        "lnejOluCfObTccb+5nezt1yZMuWo0Ejt5cBluPmQ+17B3HhCBDBoT5avUbI3gY8EECZ5/Ly62zcke9TfA06/XVM4813EhnApGjiaM5878pL68rn3QaAEyxyvCyLz1sQeeB7RLVcqRf1m4xwNAD769w2nEVE7e+IW/ouc0oCgxRPdZVrrKISxT8QW4AETAltSVhu55oaRqpl25bz6nMEVeocDZ0kj/cLfvJQUlkLcXq+PRoyTKtRZdaSfq5QYDwU5MzYdMsNdTRTbEfzuGFMwz85zwKbslg1tD5mYjnTenRe9qbBS4zpFhBZ+l2Nb8gwiIPP7Q7vE5CZbb+u4Z2KhEw==");
-
-    const std::vector<AvRecord> records = { peRecord, powerShellRecord };
-
-    for (const AvRecord& record : records) {
-        if (VerifyRecordSignature(record)) {
-            database->recordsByPrefix[record.objectSignaturePrefix].push_back(record);
+bool WriteDefaultAntivirusDatabaseFiles(
+    const std::wstring& manifestPath,
+    const std::wstring& dataPath,
+    std::wstring* errorMessage)
+{
+    const std::vector<unsigned char> manifestBytes = DecodeBase64OrPem(kDefaultManifestBase64);
+    const std::vector<unsigned char> dataBytes = DecodeBase64OrPem(kDefaultDataBase64);
+    if (manifestBytes.empty() || dataBytes.empty()) {
+        if (errorMessage) {
+            *errorMessage = L"Не удалось декодировать встроенные базы";
         }
+        return false;
     }
 
-    database->loaded = true;
-    database->totalRecordCount = 0;
-    for (const auto& bucket : database->recordsByPrefix) {
-        database->totalRecordCount += bucket.second.size();
+    if (!WriteFileBytes(manifestPath, manifestBytes) || !WriteFileBytes(dataPath, dataBytes)) {
+        if (errorMessage) {
+            *errorMessage = L"Не удалось записать встроенные базы на диск";
+        }
+        return false;
     }
-    database->releaseUnixSeconds = static_cast<long long>(time(nullptr));
-    database->releaseDateText = FormatLocalDateTime(database->releaseUnixSeconds);
+
+    return true;
+}
+
+AvDatabaseLoadResult LoadAntivirusDatabaseFromFiles(
+    const std::wstring& manifestPath,
+    const std::wstring& dataPath,
+    AvDatabase* database)
+{
+    AvDatabaseLoadResult result = {};
+    std::vector<unsigned char> manifestBytes;
+    std::vector<unsigned char> dataBytes;
+
+    if (!ReadFileBytes(manifestPath, &manifestBytes) || !ReadFileBytes(dataPath, &dataBytes)) {
+        result.status = AvDatabaseLoadStatus::IoError;
+        result.message = L"Не удалось прочитать файлы антивирусных баз";
+        return result;
+    }
+
+    return LoadAntivirusDatabaseFromBytes(manifestBytes, dataBytes, database);
 }
 
 void ClearAntivirusDatabase(AvDatabase* database)
@@ -517,7 +940,7 @@ ScanOutcome ScanDirectoryPath(const std::wstring& path, const AvDatabase& databa
     outcome.completed = true;
     outcome.targetPath = path;
 
-    DWORD attributes = GetFileAttributesW(path.c_str());
+    const DWORD attributes = GetFileAttributesW(path.c_str());
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
         outcome.completed = false;
         outcome.details = L"Не удалось открыть директорию";
