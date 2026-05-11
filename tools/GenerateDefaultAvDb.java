@@ -53,7 +53,7 @@ public class GenerateDefaultAvDb {
                 UUID.fromString("22222222-2222-2222-2222-222222222222"),
                 "Test.PS.Mimikatz",
                 "Invoke-M".getBytes(StandardCharsets.US_ASCII),
-                hex("3d3f7b2f76c1cf92e1bf524cecbf4668d1f6df1e92f74811fd7f7f767d5df947"),
+                hex("ecbeb034f4ca297499b4eabc5c2d437c1edbb366a144943aa7488226b859eab0"),
                 7L,
                 "POWERSHELL",
                 0L,
